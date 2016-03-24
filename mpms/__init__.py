@@ -1,4 +1,6 @@
+# coding=utf-8
 """
+Do parallel python works easily in multithreads in multiprocesses (at least up to 1000 or 2000 total threads!)
 多进程 多线程作业框架
 至少支持几千个线程
 author: aploium@aploium.com
@@ -20,7 +22,6 @@ def _producer_multi_threads(queue_task, queue_product, worker_function):
     :type worker_function: function
     """
     is_started = False  # 是否已经接收到了至少一个任务
-    # dbgprint('Thread Start:', threading.current_thread().name, v=4)
     while True:
         try:
             task = queue_task.get(timeout=1)
@@ -35,7 +36,6 @@ def _producer_multi_threads(queue_task, queue_product, worker_function):
         else:  # 进行工作并将结果加入队列
             queue_product.put(worker_function(task))
 
-    # dbgprint('Thread End:', threading.current_thread().name, v=4)
     exit()
 
 
@@ -51,9 +51,6 @@ def _producer_multi_processes(queue_task,
     :type threads_per_process: int
     :type worker_function: function
     """
-    # global q_threads
-    # dbgprint('进程启动', multiprocessing.current_process().name)
-    # q_threads = queue.Queue()
 
     pool = [threading.Thread(target=_producer_multi_threads, args=(queue_task, queue_product, worker_function),
                              daemon=True)
@@ -67,17 +64,20 @@ def _producer_multi_processes(queue_task,
         t.join()
         del t
 
-    # dbgprint('进程结束:', multiprocessing.current_process().name, v=4)
     os._exit(1)  # 暴力退出子进程
 
 
 class _QueueEndSignal:
-    def __init__(self):
+    def __init__(self) -> None:
         pass
 
 
 class MultiProcessesMultiThreads:
-    def _product_receiver(self):
+    """
+    provide an simple high-level multi-processes-multi-threads work environment
+    """
+
+    def _product_receiver(self) -> None:
         """
         接受子进程传入的结果,并把它发送到master_product_handler()中
 
@@ -103,9 +103,13 @@ class MultiProcessesMultiThreads:
                 received_flag = True
 
     def put(self, task):
+        """
+        put task params into working queue, just like package queue's put
+        :param task:
+        """
         self.task_queue.put(task)
 
-    def close(self):
+    def close(self) -> None:
         """
         Close task queue
         :return:
@@ -114,10 +118,15 @@ class MultiProcessesMultiThreads:
         # 在任务队列尾部加入结束信号来关闭任务队列
         for i in range(self.processes * self.threads_per_process):
             self.put(end_signal)
+        self.task_queue.close()
         self.is_task_queue_closed = True
 
-    def join(self):
-        # 若没有关闭任务队列则先关闭
+    def join(self) -> None:
+        """
+        Wait until the works and handlers terminates.
+
+        """
+        # Close the task queue if didn't
         if not self.is_task_queue_closed:
             self.close()
         # 等待所有工作进程结束

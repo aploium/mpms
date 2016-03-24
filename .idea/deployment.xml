@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
-  <component name="PublishConfigData" autoUpload="Always" serverName="local Python35-32">
+  <component name="PublishConfigData" autoUpload="Always" serverName="local Python35-32" uploadOnCheckin="cda6434c-423a-4605-974a-2a2cced70409">
     <serverData>
       <paths name="local Python35-32">
         <serverdata>
@@ -13,6 +13,7 @@
         </serverdata>
       </paths>
     </serverData>
+    <option name="myUploadOnCheckinName" value="local Python35-32" />
     <option name="myAutoUpload" value="ALWAYS" />
   </component>
 </project>
