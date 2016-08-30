@@ -99,12 +99,13 @@ class MultiProcessesMultiThreads:
                 self.product_queue.task_done()
                 break
             try:
+                meta = {"self": self}
                 if isinstance(product, dict):
-                    self.product_handler(**product)
+                    self.product_handler(meta, **product)
                 elif isinstance(product, (tuple, list)):
-                    self.product_handler(*product)
+                    self.product_handler(meta, *product)
                 else:
-                    self.product_handler(product)
+                    self.product_handler(meta, product)
             except:
                 traceback.print_exc()
             finally:
@@ -129,14 +130,15 @@ class MultiProcessesMultiThreads:
         self.task_queue.close()
         self.is_task_queue_closed = True
 
-    def join(self):
+    def join(self, close=True):
         """
         Wait until the works and handlers terminates.
 
         """
-        # Close the task queue if didn't
-        if not self.is_task_queue_closed:
-            self.close()
+        if close:  # 注意: 如果此处不close, 则一定需要在其他地方close, 否则无法结束
+            # 先close
+            if not self.is_task_queue_closed:
+                self.close()
         # 等待所有工作进程结束
         for p in self.worker_processes_pool:
             p.join()

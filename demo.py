@@ -56,7 +56,7 @@ def worker(arg):
     return arg, "hello world"
 
 
-def handler(arg, string):
+def handler(meta, arg, string):
     """
     Accept and handle worker's product
     It must have at least one arg, because any function in python will return value (maybe None)
