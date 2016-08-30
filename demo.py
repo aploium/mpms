@@ -56,7 +56,7 @@ def worker(arg):
     return arg, "hello world"
 
 
-def handler(arg):
+def handler(arg, string):
     """
     Accept and handle worker's product
     It must have at least one arg, because any function in python will return value (maybe None)
@@ -70,7 +70,7 @@ def handler(arg):
     即使worker无显示返回值(即没有return)也应该写一个参数来接收None
 
     """
-    print("received", arg, time())
+    print("received", arg, string, time())
 
 
 # IMPORTANT:
