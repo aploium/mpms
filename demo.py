@@ -33,12 +33,13 @@ Processes:5 Threads_per_process:10 Total_threads:50 TotalTime: 8.134965896606445
 Processes:3 Threads_per_process:3 Total_threads:9 TotalTime: 44.83632779121399
 Processes:1 Threads_per_process:1 Total_threads:1 TotalTime: 401.3383722305298
 """
+from pprint import pprint
 from time import time, sleep
 
 from mpms import MultiProcessesMultiThreads
 
 
-def worker(arg):
+def worker(arg, t):
     """
     Worker function, accept task parameters and do actual work
     should be able to accept at least one arg
@@ -48,7 +49,7 @@ def worker(arg):
     总是工作在外部进程的线程中 (即不工作在主进程中)
     """
     sleep(0.2)  # delay 0.2 second
-    print(arg)
+    print(arg, t)
 
     # worker's return value will be added to product queue, waiting handler to handle
     # you can return any type here (Included the None , of course)
@@ -70,7 +71,9 @@ def handler(meta, arg, string):
     即使worker无显示返回值(即没有return)也应该写一个参数来接收None
 
     """
+
     print("received", arg, string, time())
+    pprint(meta)
 
 
 # IMPORTANT:
@@ -103,14 +106,15 @@ def main():
             worker,  # worker function
             handler,  # handler function
             processes=processes,  # optional, how many processes, default value is your cpu core number
-            threads_per_process=threads_per_process  # optional, how many threads per process, default is 2
+            threads_per_process=threads_per_process,  # optional, how many threads per process, default is 2
+            meta={"any": 1, "objects": "you", "want": {"pass": "to"}, "worker": 0.5},
         )
         start_time = time()  # when we started  # 记录开始时间
 
         # put task parameters into the task queue, 2000 total tasks
         # 把任务加入任务队列,一共2000次
         for i in range(2000):
-            m.put(i)
+            m.put([i, time()])
 
         # optional, close the task queue. queue will be auto closed when join()
         # 关闭任务队列,可选. 在join()的时候会自动关闭
