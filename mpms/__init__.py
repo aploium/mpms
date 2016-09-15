@@ -99,13 +99,12 @@ class MultiProcessesMultiThreads:
                 self.product_queue.task_done()
                 break
             try:
-                meta = {"self": self}
                 if isinstance(product, dict):
-                    self.product_handler(meta, **product)
+                    self.product_handler(self.meta, **product)
                 elif isinstance(product, (tuple, list)):
-                    self.product_handler(meta, *product)
+                    self.product_handler(self.meta, *product)
                 else:
-                    self.product_handler(meta, product)
+                    self.product_handler(self.meta, product)
             except:
                 traceback.print_exc()
             finally:
@@ -150,7 +149,7 @@ class MultiProcessesMultiThreads:
         del self.task_queue
 
     def __init__(self, worker_function, product_handler, processes=None, threads_per_process=2,
-                 task_queue_size=-1, product_queue_size=-1):
+                 task_queue_size=-1, product_queue_size=-1, meta=None):
         """
         init
 
@@ -167,6 +166,9 @@ class MultiProcessesMultiThreads:
         self.task_queue_size = task_queue_size
         self.product_queue_size = product_queue_size
         self.is_task_queue_closed = False
+
+        self.meta = meta or {}
+        self.meta["self"] = self
 
         # 初始化任务队列 进程级
         self.task_queue = multiprocessing.JoinableQueue(self.task_queue_size)

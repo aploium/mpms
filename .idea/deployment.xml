@@ -12,6 +12,13 @@
           </excludedPaths>
         </serverdata>
       </paths>
+      <paths name="local python35">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/" local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
     </serverData>
     <option name="myUploadOnCheckinName" value="local Python35-32" />
     <option name="myAutoUpload" value="ALWAYS" />
