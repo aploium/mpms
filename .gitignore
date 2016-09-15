@@ -6,7 +6,7 @@
 
 
 # if you remove the above rule, at least ignore the following:
-.idea/
+.idea
 
 ## File-based project format:
 *.ipr
@@ -27,4 +27,6 @@ atlassian-ide-plugin.xml
 com_crashlytics_export_strings.xml
 crashlytics.properties
 crashlytics-build.properties
+
+mpms/__pycache__/
 
