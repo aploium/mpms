@@ -1,8 +1,9 @@
 # mpms
-简易Python多进程-多线程任务队列 (自用)
-
+Simple python Multiprocesses-Multithreads queue  
+简易Python多进程-多线程任务队列 (自用)  
+  
 在多个进程的多个线程的worker中完成耗时的任务, 并在主进程的handler中处理结果  
-
+  
 只支持Python3.4+  
 
 ## demo
@@ -60,4 +61,7 @@ if __name__ == '__main__':
     print("Real time spent:", spent_time)
     print("You are faster about: {}x".format(round(total_req_time/spent_time,3)))
 ```
+
+点击下面的图片看以上脚本的演示视频  
+[![mpms demo](https://asciinema.org/a/85802.png)](https://asciinema.org/a/85802)  
 
