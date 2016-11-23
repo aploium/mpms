@@ -20,6 +20,10 @@ except:
 __ALL__ = ["MultiProcessesMultiThreads"]
 
 
+def _dummy_handler(*args, **kwargs):
+    pass
+
+
 def _producer_multi_threads(queue_task, queue_product, worker_function):
     """
     负责在本进程内分发多线程任务
@@ -216,7 +220,7 @@ class MultiProcessesMultiThreads:
         del self.product_queue
         del self.task_queue
 
-    def __init__(self, worker_function, product_handler, processes=None, threads_per_process=2,
+    def __init__(self, worker_function, product_handler=None, processes=None, threads_per_process=2,
                  task_queue_size=-1, product_queue_size=-1, meta=None):
         """
         init
@@ -230,7 +234,7 @@ class MultiProcessesMultiThreads:
         self.worker_function = worker_function
         self.processes_count = processes or os.cpu_count() or 1
         self.threads_per_process = threads_per_process
-        self.product_handler = product_handler
+        self.product_handler = product_handler or _dummy_handler
         self.worker_processes_pool = []  # process pool
         self.task_queue_size = task_queue_size
         self.product_queue_size = product_queue_size
