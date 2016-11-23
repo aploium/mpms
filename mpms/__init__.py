@@ -90,7 +90,7 @@ class ParamTransfer(dict):
         assert isinstance(mpmt, MultiProcessesMultiThreads)
         self.mpmt = mpmt  # type: MultiProcessesMultiThreads
         self._thread_local = threading.local()
-        self._thread_local.up = {}
+        self._thread_local.cycle = {}
         self._thread_local.task = {}
 
     @property
@@ -101,11 +101,13 @@ class ParamTransfer(dict):
         return self.mpmt
 
     @property
-    def up(self):
+    def cycle(self):
         """
         :rtype: dict
         """
-        return self._thread_local.up
+        if not hasattr(self._thread_local, "cycle"):
+            self._thread_local.cycle = {}
+        return self._thread_local.cycle
 
     @property
     def task(self):
@@ -170,6 +172,12 @@ class MultiProcessesMultiThreads:
             try:
                 self.meta.task = task
 
+                # lifecycle 控制
+                self.current_handler_lifecycle_count += 1
+                if self.handler_setup is not None \
+                        and self.current_handler_lifecycle_count % self.handler_lifecycle == 1:
+                    self.handler_setup(self.meta)
+
                 if isinstance(product, dict):
                     self.product_handler(self.meta, **product)
                 elif isinstance(product, (tuple, list)):
@@ -180,7 +188,20 @@ class MultiProcessesMultiThreads:
                 traceback.print_exc()
             finally:
                 self.meta.task = None
+
+                # handler-teardown
+                if self.handler_teardown is not None \
+                        and self.current_handler_lifecycle_count % self.handler_lifecycle == 0:
+                    try:
+                        self.handler_teardown(self.meta)
+                    except:
+                        traceback.print_exc()
+
                 self.product_queue.task_done()
+
+        # final teardown
+        if self.handler_teardown is not None:
+            self.handler_teardown(self.meta)
 
     def put(self, task):
         """
@@ -220,25 +241,68 @@ class MultiProcessesMultiThreads:
         del self.product_queue
         del self.task_queue
 
-    def __init__(self, worker_function, product_handler=None, processes=None, threads_per_process=2,
-                 task_queue_size=-1, product_queue_size=-1, meta=None):
+    def __init__(
+            self,
+            worker_function,
+            product_handler=None,
+            handler_setup=None, handler_teardown=None, handler_lifecycle=1,
+            processes=None, threads_per_process=2,
+            task_queue_size=-1, product_queue_size=-1,
+            meta=None
+    ):
         """
-        init
-        
-        :param processes: If not given,would use your cpu core(s) count
-        :type worker_function: function
-        :type product_handler: function
+        简易的多进程-多线程任务队列, 包含简单的 MapReduce
+
+
+        --------- handler setup teardown lifecycle ------
+        handler_setup 中可以用于初始化环境, 比如取得一个文件句柄, 数据库connect等
+            然后传给handler使用, 在使用了几次(lifecycle的值)之后, 会由 teardown回收
+            这样的好处: 1. 避免每次handler中都需要重复打开文件或者连接数据库这种操作
+                       2. 避免由于handler崩溃导致的资源未能回收, 跟 with 的功能很像
+            例: setup: 打开 fp=log.txt --> handler: 写5个值进 fp --> teardown: 关闭fp
+
+        另一种可能更常用的使用方法是, setup中并不创建连接, 而是给handler一个结果缓冲池(比如一个list),
+            handler每次把结果写入缓冲池中,
+            执行数次(由lifecycle决定) handler 之后,
+            由 teardown 将结果实际写入存储.
+            例: setup:创建cache --> handler:写5次值入cache --> teardown:链接数据库, 写入cache中的值, 并关闭
+
+        在setup和teardown中写入值时,
+            如果是需要在实例全局生效的, 请以 meta[key] = obj 形式写入
+            如果只需要在handler(当然也包括setup和teardown)中生效, 请以 meta.cycle[key] = obj 形式写入
+
+        具体的例子可以看 demo1.py
+        --------- handler setup teardown lifecycle ------
+
+        :param worker_function: 工作函数
+        :param product_handler: 结果处理函数
+        :param handler_setup: handler的初始化函数
+        :param handler_teardown: 回收handler中资源的函数
+        :param handler_lifecycle: setup-->handler-->handler...-->teardown 这个循环中, handler会被执行几次
+        :param processes: 进程数, 若不指定则为CPU核心数
+        :type worker_function: Callable[[Any], Any]
+        :type product_handler: Callable[[ParamTransfer, Any], None]
+        :type handler_setup: Callable[[ParamTransfer], None]
+        :type handler_teardown: Callable[[ParamTransfer], None]
         :type processes: int
         :type threads_per_process: int
+        :type meta: dict
         """
         self.worker_function = worker_function
         self.processes_count = processes or os.cpu_count() or 1
         self.threads_per_process = threads_per_process
         self.product_handler = product_handler or _dummy_handler
+        self.handler_setup = handler_setup
+        self.handler_teardown = handler_teardown
+        self.handler_lifecycle = handler_lifecycle
+        self.current_handler_lifecycle_count = 0  # 用于lifecycle计数 
         self.worker_processes_pool = []  # process pool
         self.task_queue_size = task_queue_size
         self.product_queue_size = product_queue_size
         self.is_task_queue_closed = False
+
+        if bool(self.handler_setup) ^ bool(self.handler_teardown):
+            raise ValueError("handler_setup and handler_teardown should be set both or neither")
 
         self.meta = ParamTransfer(self)
         if meta is not None:
