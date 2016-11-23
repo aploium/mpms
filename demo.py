@@ -36,7 +36,7 @@ Processes:1 Threads_per_process:1 Total_threads:1 TotalTime: 401.3383722305298
 from pprint import pprint
 from time import time, sleep
 
-from mpms import MultiProcessesMultiThreads
+from mpms import MultiProcessesMultiThreads, ParamTransfer
 
 
 def worker(arg, t):
@@ -69,11 +69,12 @@ def handler(meta, arg, string):
     如果需要多线程handler,可以新建第二个多线程实例然后把它接收到的参数传入第二个实例的工作队列
     handler必须能接受worker给出的参数
     即使worker无显示返回值(即没有return)也应该写一个参数来接收None
-
+    :type meta: ParamTransfer
     """
 
     print("received", arg, string, time())
     pprint(meta)
+    print(meta.task)  # meta.task 中保存的是当前的任务参数, 即对应的worker接收到的东西
 
 
 # IMPORTANT:
@@ -107,7 +108,7 @@ def main():
             handler,  # handler function
             processes=processes,  # optional, how many processes, default value is your cpu core number
             threads_per_process=threads_per_process,  # optional, how many threads per process, default is 2
-            meta={"any": 1, "objects": "you", "want": {"pass": "to"}, "worker": 0.5},
+            meta={"any": 1, "dict": "you", "want": {"pass": "to"}, "worker": 0.5},
         )
         start_time = time()  # when we started  # 记录开始时间
 

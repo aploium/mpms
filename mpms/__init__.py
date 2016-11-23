@@ -40,13 +40,11 @@ def _producer_multi_threads(queue_task, queue_product, worker_function):
             else:
                 result = worker_function(task)
 
-            queue_product.put(result)
+            queue_product.put((task, result))
         except:
             traceback.print_exc()
         finally:
             queue_task.task_done()
-
-    exit()
 
 
 def _producer_multi_processes(queue_task,
@@ -82,6 +80,66 @@ class _QueueEndSignal:
         pass
 
 
+class ParamTransfer(dict):
+    def __init__(self, mpmt):
+        super().__init__()
+        assert isinstance(mpmt, MultiProcessesMultiThreads)
+        self.mpmt = mpmt  # type: MultiProcessesMultiThreads
+        self._thread_local = threading.local()
+        self._thread_local.up = {}
+        self._thread_local.task = {}
+
+    @property
+    def self(self):
+        """
+        :rtype: MultiProcessesMultiThreads
+        """
+        return self.mpmt
+
+    @property
+    def up(self):
+        """
+        :rtype: dict
+        """
+        return self._thread_local.up
+
+    @property
+    def task(self):
+        """
+        :rtype: Union[list, dict]
+        """
+        return self._thread_local.task
+
+    @task.setter
+    def task(self, value):
+        self._thread_local.task = value
+
+    def __setitem__(self, key, value):
+        if key == "task":
+            self._thread_local.task = value
+            return
+
+        if key == "self":
+            self.mpmt = value
+            return
+
+        super().__setitem__(key, value)
+
+    def __getitem__(self, key):
+        if key == "task":
+            return self._thread_local.task
+
+        if key == "self":
+            return self.mpmt
+
+        return super().__getitem__(key)
+
+    def __delitem__(self, key):
+        if key in ("task", "self"):
+            raise ValueError("You cannot delete the '{}' key".format(key))
+        super().__delitem__(key)
+
+
 class MultiProcessesMultiThreads:
     """
     provide an simple high-level multi-processes_count-multi-threads work environment
@@ -94,11 +152,20 @@ class MultiProcessesMultiThreads:
         """
 
         while True:
-            product = self.product_queue.get()
+            try:
+                task, product = self.product_queue.get()
+            except:
+                self.product_queue.task_done()
+                traceback.print_exc()
+                continue
+
             if isinstance(product, _QueueEndSignal):
                 self.product_queue.task_done()
                 break
+
             try:
+                self.meta.task = task
+
                 if isinstance(product, dict):
                     self.product_handler(self.meta, **product)
                 elif isinstance(product, (tuple, list)):
@@ -108,6 +175,7 @@ class MultiProcessesMultiThreads:
             except:
                 traceback.print_exc()
             finally:
+                self.meta.task = None
                 self.product_queue.task_done()
 
     def put(self, task):
@@ -141,7 +209,7 @@ class MultiProcessesMultiThreads:
         # 等待所有工作进程结束
         for p in self.worker_processes_pool:
             p.join()
-        self.product_queue.put(_QueueEndSignal())  # 在结果队列中加入退出指示信号
+        self.product_queue.put((None, _QueueEndSignal()))  # 在结果队列中加入退出指示信号
         self.handler_thread.join()  # 等待处理线程结束
 
     def __del__(self):
@@ -152,10 +220,11 @@ class MultiProcessesMultiThreads:
                  task_queue_size=-1, product_queue_size=-1, meta=None):
         """
         init
-
+        
+        :param processes: If not given,would use your cpu core(s) count
         :type worker_function: function
         :type product_handler: function
-        :type processes: int #If not given,would use your cpu core(s) count
+        :type processes: int
         :type threads_per_process: int
         """
         self.worker_function = worker_function
@@ -167,8 +236,9 @@ class MultiProcessesMultiThreads:
         self.product_queue_size = product_queue_size
         self.is_task_queue_closed = False
 
-        self.meta = meta or {}
-        self.meta["self"] = self
+        self.meta = ParamTransfer(self)
+        if meta is not None:
+            self.meta.update(meta)
 
         # 初始化任务队列 进程级
         self.task_queue = multiprocessing.JoinableQueue(self.task_queue_size)
@@ -176,16 +246,17 @@ class MultiProcessesMultiThreads:
         self.product_queue = multiprocessing.JoinableQueue(self.product_queue_size)
 
         # 初始化结果处理线程(在主进程中)
-        self.handler_thread = threading.Thread(target=self._product_receiver)
+        self.handler_thread = threading.Thread(target=self._product_receiver, daemon=True)
         self.handler_thread.start()
 
         for i in range(self.processes_count):
-            p = multiprocessing.Process(target=_producer_multi_processes,
-                                        args=(self.task_queue,
-                                              self.product_queue,
-                                              self.threads_per_process,
-                                              self.worker_function
-                                              )
-                                        )
+            p = multiprocessing.Process(
+                target=_producer_multi_processes,
+                args=(self.task_queue,
+                      self.product_queue,
+                      self.threads_per_process,
+                      self.worker_function
+                      )
+            )
             p.start()
             self.worker_processes_pool.append(p)
