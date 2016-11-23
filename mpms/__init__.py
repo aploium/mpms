@@ -60,10 +60,10 @@ def _producer_multi_processes(queue_task,
     :type worker_function: Callable[[Any], Any]
     """
 
-    pool = [threading.Thread(target=_producer_multi_threads, args=(queue_task, queue_product, worker_function),
-                             daemon=True)
+    pool = [threading.Thread(target=_producer_multi_threads, args=(queue_task, queue_product, worker_function))
             for _ in range(threads_per_process)]
     for t in pool:
+        t.daemon = True
         t.start()
 
     # 等待所有子线程结束
@@ -82,7 +82,7 @@ class _QueueEndSignal:
 
 class ParamTransfer(dict):
     def __init__(self, mpmt):
-        super().__init__()
+        super(ParamTransfer, self).__init__()
         assert isinstance(mpmt, MultiProcessesMultiThreads)
         self.mpmt = mpmt  # type: MultiProcessesMultiThreads
         self._thread_local = threading.local()
@@ -123,7 +123,7 @@ class ParamTransfer(dict):
             self.mpmt = value
             return
 
-        super().__setitem__(key, value)
+        super(ParamTransfer, self).__setitem__(key, value)
 
     def __getitem__(self, key):
         if key == "task":
@@ -132,12 +132,12 @@ class ParamTransfer(dict):
         if key == "self":
             return self.mpmt
 
-        return super().__getitem__(key)
+        return super(ParamTransfer, self).__getitem__(key)
 
     def __delitem__(self, key):
         if key in ("task", "self"):
             raise ValueError("You cannot delete the '{}' key".format(key))
-        super().__delitem__(key)
+        super(ParamTransfer, self).__delitem__(key)
 
 
 class MultiProcessesMultiThreads:
@@ -246,7 +246,8 @@ class MultiProcessesMultiThreads:
         self.product_queue = multiprocessing.JoinableQueue(self.product_queue_size)
 
         # 初始化结果处理线程(在主进程中)
-        self.handler_thread = threading.Thread(target=self._product_receiver, daemon=True)
+        self.handler_thread = threading.Thread(target=self._product_receiver)
+        self.handler_thread.daemon = True
         self.handler_thread.start()
 
         for i in range(self.processes_count):

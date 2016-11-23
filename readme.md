@@ -4,7 +4,7 @@ Simple python Multiprocesses-Multithreads queue
   
 在多个进程的多个线程的worker中完成耗时的任务, 并在主进程的handler中处理结果  
   
-只支持Python3.4+  
+支持python 2.7 3.4/3.5/3.6+ 
 
 ## demo
 下面这个例子演示了请求1000次`http://example.com`并将结果写入文件  
