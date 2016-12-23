@@ -271,7 +271,22 @@ class MultiProcessesMultiThreads:
             如果是需要在实例全局生效的, 请以 meta[key] = obj 形式写入
             如果只需要在handler(当然也包括setup和teardown)中生效, 请以 meta.cycle[key] = obj 形式写入
 
-        具体的例子可以看 demo1.py
+        example:
+
+            def handler_setup(meta):
+                print("setup!")
+                meta.cycle["log_file"] = open("log.txt", "a", encoding="utf-8")
+
+            def handler_teardown(meta):
+                print("teardown!")
+                meta.cycle["log_file"].close()
+
+            def handler(meta, something):
+                fw = meta.cycle["log_file"]
+                fw.write(something)
+
+
+        具体的例子可以看 demo1_plus.py
         --------- handler setup teardown lifecycle ------
 
         :param worker_function: 工作函数
