@@ -74,12 +74,11 @@ def _producer_multi_processes(queue_task,
     for t in pool:
         # dbgprint('子线程结束', t.name, multiprocessing.current_process().name, v=4)
         t.join()
-        del t
 
-    os._exit(1)  # 暴力退出子进程
+        # os._exit(1)  # 暴力退出子进程
 
 
-class _QueueEndSignal:
+class _QueueEndSignal(object):
     def __init__(self):
         pass
 
@@ -342,5 +341,6 @@ class MultiProcessesMultiThreads:
                       self.worker_function
                       )
             )
+            p.daemon = True
             p.start()
             self.worker_processes_pool.append(p)
