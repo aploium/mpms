@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # coding=utf-8
 """
-与 demo1.py 的区别是本文件使用 handler_setup 和 handler_teardown 来打开和关闭log文件
-而demo1.py在main()中打开和关闭
-plus版本的好处是可以避免程序在中途意外退出后log文件内容的丢失
+在 demo1.py 中我们在main()中打开和关闭log文件
+这里我们使用 handler_setup 和 handler_teardown 来打开和关闭log文件
+
+这样做好处是可以避免程序在中途意外退出后log文件内容的丢失
 """
 import requests
 import mpms
@@ -43,12 +44,12 @@ def main():
         handler_setup=handler_setup,
         handler_teardown=handler_teardown,
         handler_lifecycle=5,
-        processes=5,
+        processes=5, #每处理5次任务就teardown再setup一次
         threads_per_process=10,
         meta={"total_req_time": 0.0},
     )
 
-    for i in range(100):  # 请求1000次
+    for i in range(100):  # 请求100次
         m.put([i, "http://example.com/?q=" + str(i)])
 
     m.join()
