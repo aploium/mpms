@@ -6,9 +6,53 @@ Simple python Multiprocesses-Multithreads queue
   
 支持python 2.7 3.4/3.5/3.6+ 
 
+## 开始使用
+
+1. 下载本项目，并将mpms文件夹放到你的项目中
+
+下载地址:
+
+https://codeload.github.com/aploium/mpms/zip/master
+
+完成后目录结构是这样的：
+
+```
+your_project
+  |-mpms
+  |  |-__init__.py
+  |-run.py # 你的代码, 文件名随意
+  |-... # 你的项目的其他文件
+```
+
+2. 调用约定
+
+mpms的使用需要准备以下两个函数：
+
+```
+worker: 并发执行的任务函数，可以接受参数(后文将提到用put传入参数)
+handler: 全局只会运行一份的处理函数，传入参数为 meta和worker所有的返回值
+```
+
+在写好worker和handler后在主函数这样调用 -- 主线程创建对象后循环put,然后等待结束:
+
+```python
+from mpms import MultiProcessesMultiThreads
+m = MultiProcessesMultiThreads(
+    worker,
+    handler,
+    processes=5, # 进程数
+    threads_per_process=10, # 线程数
+)
+for i in range(1000): # 循环1000次, 你可以自行控制循环条件
+    m.put([第一个参数,第二个参数...]) #这里的参数列表就是worker接受的参数
+m.join()
+```
+
 ## demo
+
 下面这个例子演示了请求1000次`http://example.com`并将结果写入文件  
 worker使用5个进程, 每个进程10个线程, 共50线程  
+
 ```python
 import requests
 from mpms import MultiProcessesMultiThreads
