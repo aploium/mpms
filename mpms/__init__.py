@@ -24,7 +24,7 @@ except:
 
 __ALL__ = ["MultiProcessesMultiThreads"]
 
-VERSION = (0, 5, 0, 0)
+VERSION = (0, 5, 0, 1)
 VERSION_STR = "{}.{}.{}.{}".format(*VERSION)
 
 def _dummy_handler(*args, **kwargs):
