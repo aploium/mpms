@@ -13,12 +13,19 @@ import threading
 import traceback
 
 try:
+    import queue
+except:
+    import Queue as queue
+
+try:
     from typing import Callable, Any
 except:
     pass
 
 __ALL__ = ["MultiProcessesMultiThreads"]
 
+VERSION = (0, 5, 0, 0)
+VERSION_STR = "{}.{}.{}.{}".format(*VERSION)
 
 def _dummy_handler(*args, **kwargs):
     pass
@@ -51,6 +58,17 @@ def _producer_multi_threads(queue_task, queue_product, worker_function):
             queue_task.task_done()
 
 
+def _subprocesses_queue_transfer(source_queue, dest_queue):
+    while True:
+        try:
+            task = source_queue.get()
+            dest_queue.put(task)
+        except:
+            traceback.print_exc()
+        finally:
+            source_queue.task_done()
+
+
 def _producer_multi_processes(queue_task,
                               queue_product,
                               threads_per_process,
@@ -63,12 +81,22 @@ def _producer_multi_processes(queue_task,
     :type threads_per_process: int
     :type worker_function: Callable[[Any], Any]
     """
+    _queue_task = queue.Queue(maxsize=threads_per_process * 2)
+    _queue_product = queue.Queue()
 
-    pool = [threading.Thread(target=_producer_multi_threads, args=(queue_task, queue_product, worker_function))
+    pool = [threading.Thread(target=_producer_multi_threads, args=(_queue_task, _queue_product, worker_function))
             for _ in range(threads_per_process)]
     for t in pool:
         t.daemon = True
         t.start()
+
+    th = threading.Thread(target=_subprocesses_queue_transfer, args=(queue_task, _queue_task))
+    th.daemon = True
+    th.start()
+
+    th = threading.Thread(target=_subprocesses_queue_transfer, args=(_queue_product, queue_product))
+    th.daemon = True
+    th.start()
 
     # 等待所有子线程结束
     for t in pool:
