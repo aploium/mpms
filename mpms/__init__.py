@@ -24,7 +24,7 @@ except:
 
 __ALL__ = ["MultiProcessesMultiThreads"]
 
-VERSION = (0, 5, 0, 1)
+VERSION = (0, 6, 0, 0)
 VERSION_STR = "{}.{}.{}.{}".format(*VERSION)
 
 def _dummy_handler(*args, **kwargs):
@@ -81,7 +81,7 @@ def _producer_multi_processes(queue_task,
     :type threads_per_process: int
     :type worker_function: Callable[[Any], Any]
     """
-    _queue_task = queue.Queue(maxsize=threads_per_process * 2)
+    _queue_task = queue.Queue(maxsize=threads_per_process)
     _queue_product = queue.Queue()
 
     pool = [threading.Thread(target=_producer_multi_threads, args=(_queue_task, _queue_product, worker_function))
@@ -107,9 +107,10 @@ def _producer_multi_processes(queue_task,
 
 
 class _QueueEndSignal(object):
-    def __init__(self):
-        pass
+    pass
 
+
+_queue_end_signal = _QueueEndSignal()
 
 class ParamTransfer(dict):
     def __init__(self, mpmt):
@@ -244,7 +245,7 @@ class MultiProcessesMultiThreads:
         """
         end_signal = _QueueEndSignal()
         # 在任务队列尾部加入结束信号来关闭任务队列
-        for i in range(self.processes_count * self.threads_per_process):
+        for i in range(self.processes_count * self.threads_per_process * 2):
             self.put(end_signal)
         self.task_queue.close()
         self.is_task_queue_closed = True
@@ -261,7 +262,7 @@ class MultiProcessesMultiThreads:
         # 等待所有工作进程结束
         for p in self.worker_processes_pool:
             p.join()
-        self.product_queue.put((None, _QueueEndSignal()))  # 在结果队列中加入退出指示信号
+        self.product_queue.put((None, _queue_end_signal))  # 在结果队列中加入退出指示信号
         self.handler_thread.join()  # 等待处理线程结束
 
     def __del__(self):
