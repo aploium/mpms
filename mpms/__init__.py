@@ -23,9 +23,9 @@ try:
 except:
     pass
 
-__ALL__ = ["MultiProcessesMultiThreads"]
+__ALL__ = ["MultiProcessesMultiThreads", "MPMS", "ParamTransfer"]
 
-VERSION = (0, 6, 1, 0)
+VERSION = (0, 6, 2, 0)
 VERSION_STR = "{}.{}.{}.{}".format(*VERSION)
 
 logger = logging.getLogger(__name__)
@@ -114,6 +114,7 @@ class _QueueEndSignal(object):
 
 
 _queue_end_signal = _QueueEndSignal()
+
 
 class ParamTransfer(dict):
     def __init__(self, mpmt):
@@ -378,3 +379,7 @@ class MultiProcessesMultiThreads:
             p.daemon = True
             p.start()
             self.worker_processes_pool.append(p)
+
+
+# alias
+MPMS = MultiProcessesMultiThreads
