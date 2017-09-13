@@ -275,6 +275,13 @@ class MultiProcessesMultiThreads:
         del self.product_queue
         del self.task_queue
 
+    def __len__(self):
+        """
+        return inaccurate remain size of task queue
+        返回当前任务队列（还需要执行的）的不精确大小
+        """
+        return self.task_queue.qsize()
+
     def __init__(
             self,
             worker_function,
