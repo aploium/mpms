@@ -176,6 +176,4 @@ if __name__ == '__main__':
 print("Remaining: {size}".format(size=len(m)))  # 还有多少任务需要执行的周期性提示
 ```
 
-其实现是返回了`task_queue`(`Queue`类的对象)的`qsize()` [官方文档](https://docs.python.org/3/library/queue.html)
-
-注意这个函数返回的是对还需要处理的任务数量的**不准确**估计值
+其实现是在put后计数+1，在handler处理后计数-1，从而实现返回精确的 还需要处理的任务和正在处理的任务 数量

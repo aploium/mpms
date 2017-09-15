@@ -25,7 +25,7 @@ except:
 
 __ALL__ = ["MultiProcessesMultiThreads", "MPMS", "ParamTransfer"]
 
-VERSION = (0, 6, 2, 0)
+VERSION = (0, 6, 3, 0)
 VERSION_STR = "{}.{}.{}.{}".format(*VERSION)
 
 logger = logging.getLogger(__name__)
@@ -220,6 +220,7 @@ class MultiProcessesMultiThreads:
                 traceback.print_exc()
             finally:
                 self.meta.task = None
+                self.queuesize -= 1
 
                 # handler-teardown
                 if self.handler_teardown is not None \
@@ -241,6 +242,7 @@ class MultiProcessesMultiThreads:
         :param task:
         """
         self.task_queue.put(task)
+        self.queuesize += 1
 
     def close(self):
         """
@@ -277,10 +279,10 @@ class MultiProcessesMultiThreads:
 
     def __len__(self):
         """
-        return inaccurate remain size of task queue
-        返回当前任务队列（还需要执行的）的不精确大小
+        return accurate remain size of task queue
+        返回当前任务队列（还需要执行+正在执行还没结束）的精确大小
         """
-        return self.task_queue.qsize()
+        return self.queuesize
 
     def __init__(
             self,
@@ -356,6 +358,7 @@ class MultiProcessesMultiThreads:
         self.task_queue_size = task_queue_size
         self.product_queue_size = product_queue_size
         self.is_task_queue_closed = False
+        self.queuesize = 0 # 用于计数还未完成的任务数量
 
         if bool(self.handler_setup) ^ bool(self.handler_teardown):
             raise ValueError("handler_setup and handler_teardown should be set both or neither")
