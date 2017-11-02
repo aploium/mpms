@@ -1,385 +1,366 @@
+#!/usr/bin/env python3
 # coding=utf-8
-"""
-Do parallel python works easily in multithreads in multiprocesses (at least up to 1000 or 2000 total threads!)
-多进程 多线程作业框架
-至少支持几千个线程
-author: aploium@aploium.com
-
-"""
+from __future__ import absolute_import, division, unicode_literals
 
 import multiprocessing
+from multiprocessing.queues import Empty, Full
 import os
 import threading
 import traceback
 import logging
+import collections
 
 try:
-    import queue
-except:
-    import Queue as queue
-
-try:
-    from typing import Callable, Any
+    from typing import Callable, Any, Union
 except:
     pass
 
-__ALL__ = ["MultiProcessesMultiThreads", "MPMS", "ParamTransfer"]
+__ALL__ = ["GMP", "Meta"]
 
-VERSION = (0, 6, 2, 0)
+VERSION = (2, 0, 0, 0)
 VERSION_STR = "{}.{}.{}.{}".format(*VERSION)
 
 logger = logging.getLogger(__name__)
 
 
-def _dummy_handler(*args, **kwargs):
-    pass
-
-
-def _producer_multi_threads(queue_task, queue_product, worker_function):
-    """
-    负责在本进程内分发多线程任务
-    :type queue_task: multiprocessing.JoinableQueue
-    :type queue_product: multiprocessing.JoinableQueue
-    :type worker_function: Callable[[Any], Any]
-    """
+def _put(q, v):
     while True:
         try:
-            task = queue_task.get()
-            if isinstance(task, _QueueEndSignal):  # 结束信号
-                # finally 里的 task_done() 在break的情况下仍然会被执行
-                break
-            if isinstance(task, dict):
-                result = worker_function(**task)
-            elif isinstance(task, (tuple, list)):
-                result = worker_function(*task)
-            else:
-                result = worker_function(task)
-
-            queue_product.put((task, result))
-        except:
-            traceback.print_exc()
-        finally:
-            queue_task.task_done()
+            q.put(v, timeout=1)
+        except Full:
+            # gevent.sleep(0.1)
+            continue
+        else:
+            return
 
 
-def _subprocesses_queue_transfer(source_queue, dest_queue):
+def _get(q):
     while True:
         try:
-            task = source_queue.get()
-            dest_queue.put(task)
-        except:
-            traceback.print_exc()
-        finally:
-            source_queue.task_done()
+            return q.get(timeout=1)
+        except Empty:
+            # gevent.sleep(0.1)
+            continue
 
 
-def _producer_multi_processes(queue_task,
-                              queue_product,
-                              threads_per_process,
-                              worker_function):
+#
+# def _worker_container(result_q, func, taskid, args, kwargs):
+#     """
+#     Args:
+#         result_q (multiprocessing.Queue|None)
+#     """
+#     try:
+#         result = func(*args, **kwargs)
+#     except Exception as e:
+#         logger.error("An error occurs in worker thread, taskid: %s", taskid, exc_info=True)
+#         if result_q is not None:
+#             result_q.put_nowait((taskid, e))
+#         raise
+#     else:
+#         logger.debug("done %s", taskid)
+#         if result_q is not None:
+#             result_q.put_nowait((taskid, result))
+#             # gevent.sleep(0.1)
+#
+#
+# def _slaver(task_q, result_q,
+#             threads, worker):
+#     """
+#     接收与多进程任务并分发给子线程
+#
+#     Args:
+#         task_q (multiprocessing.Queue)
+#         result_q (multiprocessing.Queue|None)
+#         threads (int)
+#         worker (Callable)
+#     """
+#     _cur_name = "{}(PID:{}) {}".format(multiprocessing.current_process().name,
+#                                        multiprocessing.current_process().pid,
+#                                        gevent.getcurrent())
+#     logger.debug("mpms subprocess %s start. threads:%s", _cur_name, threads)
+#     pool = gevent.pool.Pool(threads)
+#
+#     while True:
+#         pool.wait_available()
+#         taskid, args, kwargs = task_q.get()
+#         # taskid, args, kwargs = _get(task_q)
+#         logger.debug("mpms subprocess %s got %s %s %s", _cur_name, taskid, args, kwargs)
+#         if taskid is StopIteration:
+#             logger.debug("mpms subprocess %s got stop signal", _cur_name)
+#             break
+#         # gevent.sleep(0.1)
+#         pool.spawn(_worker_container, result_q, worker, taskid, args, kwargs)
+#
+#         # gevent.sleep(0.1)
+#
+#     pool.join()
+#     logger.debug("mpms subprocess %s exiting", _cur_name)
+#     gevent.sleep(0.1)
+
+
+
+def _worker_container2(task_q, result_q, func):
+    """
+    Args:
+        result_q (multiprocessing.Queue|None)
+    """
+    _cur_name = "{}(PID:{}) {}".format(multiprocessing.current_process().name,
+                                       multiprocessing.current_process().pid,
+                                       gevent.getcurrent())
+
+    while True:
+        taskid, args, kwargs = task_q.get()
+        # taskid, args, kwargs = _get(task_q)
+        logger.debug("mpms worker %s got %s %s %s", _cur_name, taskid, args, kwargs)
+        if taskid is StopIteration:
+            logger.debug("mpms worker %s got stop signal", _cur_name)
+            break
+
+        try:
+            result = func(*args, **kwargs)
+        except Exception as e:
+            logger.error("An error occurs in worker thread, taskid: %s", taskid, exc_info=True)
+            result_q.put_nowait((taskid, e))
+        else:
+            logger.debug("done %s", taskid)
+            result_q.put_nowait((taskid, result))
+
+
+def _slaver2(task_q, result_q, threads, func):
     """
     接收与多进程任务并分发给子线程
 
-    :type queue_task: multiprocessing.JoinableQueue
-    :type queue_product: multiprocessing.JoinableQueue
-    :type threads_per_process: int
-    :type worker_function: Callable[[Any], Any]
+    Args:
+        task_q (multiprocessing.Queue)
+        result_q (multiprocessing.Queue|None)
+        threads (int)
+        func (Callable)
     """
-    _queue_task = queue.Queue(maxsize=threads_per_process)
-    _queue_product = queue.Queue()
+    _cur_name = "{}(PID:{})".format(multiprocessing.current_process().name,
+                                    multiprocessing.current_process().pid, )
+    logger.debug("mpms subprocess %s start. threads:%s", _cur_name, threads)
+    for i in range(threads):
+        th = threading.Thread
 
-    pool = [threading.Thread(target=_producer_multi_threads, args=(_queue_task, _queue_product, worker_function))
-            for _ in range(threads_per_process)]
-    for t in pool:
-        t.daemon = True
-        t.start()
-
-    th = threading.Thread(target=_subprocesses_queue_transfer, args=(queue_task, _queue_task))
-    th.daemon = True
-    th.start()
-
-    th = threading.Thread(target=_subprocesses_queue_transfer, args=(_queue_product, queue_product))
-    th.daemon = True
-    th.start()
-
-    # 等待所有子线程结束
-    for t in pool:
-        t.join()
-        logger.debug("subthread {} of {} stopped".format(t.name, multiprocessing.current_process().name))
-    logger.debug("subprocess {} completed".format(multiprocessing.current_process().name))
+    gevent.joinall(workers, raise_error=True)
+    logger.debug("mpms subprocess %s exiting", _cur_name)
 
 
-class _QueueEndSignal(object):
-    pass
+def get_cpu_count():
+    try:
+        if hasattr(os, "cpu_count"):
+            return os.cpu_count()
+        else:
+            return multiprocessing.cpu_count()
+    except:
+        return 0
 
 
-_queue_end_signal = _QueueEndSignal()
-
-
-class ParamTransfer(dict):
-    def __init__(self, mpmt):
-        super(ParamTransfer, self).__init__()
-        assert isinstance(mpmt, MultiProcessesMultiThreads)
-        self.mpmt = mpmt  # type: MultiProcessesMultiThreads
-        self._thread_local = threading.local()
-        self._thread_local.cycle = {}
-        self._thread_local.task = {}
+class Meta(dict):
+    def __init__(self, mpms):
+        super(Meta, self).__init__()
+        self.mpms = mpms  # type: GMP
+        self.args = ()
+        self.kwargs = ()
+        self.taskid = None
 
     @property
     def self(self):
         """
-        :rtype: MultiProcessesMultiThreads
+        Returns:
+            GMP
         """
-        return self.mpmt
-
-    @property
-    def cycle(self):
-        """
-        :rtype: dict
-        """
-        if not hasattr(self._thread_local, "cycle"):
-            self._thread_local.cycle = {}
-        return self._thread_local.cycle
-
-    @property
-    def task(self):
-        """
-        :rtype: Union[list, dict]
-        """
-        return self._thread_local.task
-
-    @task.setter
-    def task(self, value):
-        self._thread_local.task = value
-
-    def __setitem__(self, key, value):
-        if key == "task":
-            self._thread_local.task = value
-            return
-
-        if key == "self":
-            self.mpmt = value
-            return
-
-        super(ParamTransfer, self).__setitem__(key, value)
-
-    def __getitem__(self, key):
-        if key == "task":
-            return self._thread_local.task
-
-        if key == "self":
-            return self.mpmt
-
-        return super(ParamTransfer, self).__getitem__(key)
-
-    def __delitem__(self, key):
-        if key in ("task", "self"):
-            raise ValueError("You cannot delete the '{}' key".format(key))
-        super(ParamTransfer, self).__delitem__(key)
+        return self.mpms
 
 
-class MultiProcessesMultiThreads:
+class GMP:
     """
-    provide an simple high-level multi-processes_count-multi-threads work environment
+    简易的多进程-多线程任务队列 -- gevent
+
+    Args:
+        worker (Callable): 工作函数
+        collector (Callable[[ParamTransfer, Any], None]): 结果处理函数
+        processes (int): 进程数, 若不指定则为CPU核心数
+        threads (int): 每个进程下多少个线程
+        meta (Meta): meta信息
+
+    Notes:
+        --------- handler setup teardown lifecycle ------
+        setup 中可以用于初始化环境, 比如取得一个文件句柄, 数据库connect等
+            然后传给handler使用, 在使用了几次(lifecycle的值)之后, 会由 teardown回收
+            这样的好处: 1. 避免每次handler中都需要重复打开文件或者连接数据库这种操作
+                       2. 避免由于handler崩溃导致的资源未能回收, 跟 with 的功能很像
+            例: setup: 打开 fp=log.txt --> handler: 写5个值进 fp --> teardown: 关闭fp
+
+    具体的例子可以看 demo1_plus.py
+    --------- handler setup teardown lifecycle ------
+
     """
 
-    def _product_receiver(self):
+    def __init__(
+            self,
+            worker,
+            collector=None,
+            processes=None, threads=2,
+            task_queue_maxlen=-1,
+            meta=None
+    ):
+
+        self.worker = worker
+        self.collector = collector
+
+        self.processes_count = processes or get_cpu_count() or 1
+        self.threads_count = threads
+
+        self.total_count = 0  # 总任务数
+        self.finish_count = 0  # 已完成的任务数
+
+        self.processes_pool = []  # process pool
+        self.task_queue_maxlen = task_queue_maxlen
+        self.task_queue_closed = False
+
+        self.meta = Meta(self)
+        if meta is not None:
+            self.meta.update(meta)
+
+        self.task_q = multiprocessing.Queue()
+
+        if self.collector:
+            self.result_q = multiprocessing.Queue()
+        else:
+            self.result_q = None
+
+        self.collector_thread = None
+
+        self.worker_processes_pool = []
+
+        self.running_tasks = {}
+
+    def start(self):
+
+        logger.debug("mpms starting worker subprocess")
+        for i in range(self.processes_count):
+            p = multiprocessing.Process(
+                # target=_slaver,
+                target=_slaver2,
+                args=(self.task_q, self.result_q,
+                      self.threads_count, self.worker),
+                # name="mpms-{}".format(i)
+            )
+            p.daemon = True
+            p.start()
+            # gevent.sleep(0.1)
+            self.worker_processes_pool.append(p)
+
+        if self.collector is not None:
+            logger.debug("mpms starting collect subprocess")
+            # self.collector_thread = gevent.spawn(self._collector_container)
+            import threading
+            self.collector_thread = threading.Thread(target=self._collector_container)
+            self.collector_thread.daemon = True
+            self.collector_thread.start()
+            # self.collector_thread = multiprocessing.Process(target=self._collector_container)
+            # self.collector_thread.daemon = True
+            # self.collector_thread.start()
+
+            # gevent.sleep(0.1)
+        else:
+            logger.debug("mpms no collector given, skip collector thread")
+
+    def put(self, *args, **kwargs):
         """
-        接受子进程传入的结果,并把它发送到master_product_handler()中
+        put task params into working queue
 
         """
+        if self.task_queue_maxlen != -1:
+            # gevent.sleep(0.1)
+            while self.task_q.qsize() > self.task_queue_maxlen:
+                gevent.sleep(0.1)
+                logger.debug("q full %s", self.task_q.qsize())
 
-        while True:
-            try:
-                task, product = self.product_queue.get()
-            except:
-                self.product_queue.task_done()
-                traceback.print_exc()
-                continue
-
-            if isinstance(product, _QueueEndSignal):
-                self.product_queue.task_done()
-                break
-
-            try:
-                self.meta.task = task
-
-                # lifecycle 控制
-                self.current_handler_lifecycle_count += 1
-                if self.handler_setup is not None \
-                        and self.current_handler_lifecycle_count % self.handler_lifecycle == 1:
-                    self.handler_setup(self.meta)
-
-                if isinstance(product, dict):
-                    self.product_handler(self.meta, **product)
-                elif isinstance(product, (tuple, list)):
-                    self.product_handler(self.meta, *product)
-                else:
-                    self.product_handler(self.meta, product)
-            except:
-                traceback.print_exc()
-            finally:
-                self.meta.task = None
-
-                # handler-teardown
-                if self.handler_teardown is not None \
-                        and self.current_handler_lifecycle_count % self.handler_lifecycle == 0:
-                    try:
-                        self.handler_teardown(self.meta)
-                    except:
-                        traceback.print_exc()
-
-                self.product_queue.task_done()
-
-        # final teardown
-        if self.handler_teardown is not None:
-            self.handler_teardown(self.meta)
-
-    def put(self, task):
-        """
-        put task params into working queue, just like package queue's put
-        :param task:
-        """
-        self.task_queue.put(task)
-
-    def close(self):
-        """
-        Close task queue
-        :return:
-        """
-        end_signal = _QueueEndSignal()
-        # 在任务队列尾部加入结束信号来关闭任务队列
-        for i in range(self.processes_count * self.threads_per_process * 3):
-            self.put(end_signal)
-        self.task_queue.close()
-        self.is_task_queue_closed = True
+        taskid = self._gen_taskid()
+        task_tuple = (taskid, args, kwargs)
+        if self.collector:
+            self.running_tasks[taskid] = task_tuple
+        # gevent.sleep(0.1)
+        self.task_q.put_nowait(task_tuple)
+        # gevent.sleep(0.1)
+        self.total_count += 1
 
     def join(self, close=True):
         """
         Wait until the works and handlers terminates.
 
         """
-        if close:  # 注意: 如果此处不close, 则一定需要在其他地方close, 否则无法结束
-            # 先close
-            if not self.is_task_queue_closed:
-                self.close()
+        if close and not self.task_queue_closed:  # 注意: 如果此处不close, 则一定需要在其他地方close, 否则无法结束
+            self.close()
+
         # 等待所有工作进程结束
-        for p in self.worker_processes_pool:
+        for p in self.worker_processes_pool:  # type: multiprocessing.Process
             p.join()
-        logger.debug("all worker completed")
-        self.product_queue.put((None, _queue_end_signal))  # 在结果队列中加入退出指示信号
-        self.handler_thread.join()  # 等待处理线程结束
-        logger.debug("handler_thread completed")
+            # while True:
+            # try:
+            #     p.join(10)
+            # except multiprocessing.TimeoutError:
+            #     gevent.sleep(0.1)
+            #     continue
+            # else:
+            #     break
+            logger.debug("mpms subprocess %s %s closed", p, p.pid)
+        logger.debug("mpms: all worker completed")
 
-    def __del__(self):
-        del self.product_queue
-        del self.task_queue
+        if self.collector:
+            self.result_q.put_nowait((StopIteration, None))  # 在结果队列中加入退出指示信号
+            self.collector_thread.join()  # 等待处理线程结束
 
-    def __init__(
-            self,
-            worker_function,
-            product_handler=None,
-            handler_setup=None, handler_teardown=None, handler_lifecycle=1,
-            processes=None, threads_per_process=2,
-            task_queue_size=-1, product_queue_size=-1,
-            meta=None
-    ):
+        logger.debug("mpms join completed")
+
+    def waiting_size(self):
+        return self.total_count - self.finish_count
+
+    def _gen_taskid(self):
+        return "mpms{}".format(self.total_count)
+
+    def _collector_container(self):
         """
-        简易的多进程-多线程任务队列, 包含简单的 MapReduce
+        接受子进程传入的结果,并把它发送到master_product_handler()中
 
-
-        --------- handler setup teardown lifecycle ------
-        handler_setup 中可以用于初始化环境, 比如取得一个文件句柄, 数据库connect等
-            然后传给handler使用, 在使用了几次(lifecycle的值)之后, 会由 teardown回收
-            这样的好处: 1. 避免每次handler中都需要重复打开文件或者连接数据库这种操作
-                       2. 避免由于handler崩溃导致的资源未能回收, 跟 with 的功能很像
-            例: setup: 打开 fp=log.txt --> handler: 写5个值进 fp --> teardown: 关闭fp
-
-        另一种可能更常用的使用方法是, setup中并不创建连接, 而是给handler一个结果缓冲池(比如一个list),
-            handler每次把结果写入缓冲池中,
-            执行数次(由lifecycle决定) handler 之后,
-            由 teardown 将结果实际写入存储.
-            例: setup:创建cache --> handler:写5次值入cache --> teardown:链接数据库, 写入cache中的值, 并关闭
-
-        在setup和teardown中写入值时,
-            如果是需要在实例全局生效的, 请以 meta[key] = obj 形式写入
-            如果只需要在handler(当然也包括setup和teardown)中生效, 请以 meta.cycle[key] = obj 形式写入
-
-        example:
-
-            def handler_setup(meta):
-                print("setup!")
-                meta.cycle["log_file"] = open("log.txt", "a", encoding="utf-8")
-
-            def handler_teardown(meta):
-                print("teardown!")
-                meta.cycle["log_file"].close()
-
-            def handler(meta, something):
-                fw = meta.cycle["log_file"]
-                fw.write(something)
-
-
-        具体的例子可以看 demo1_plus.py
-        --------- handler setup teardown lifecycle ------
-
-        :param worker_function: 工作函数
-        :param product_handler: 结果处理函数
-        :param handler_setup: handler的初始化函数
-        :param handler_teardown: 回收handler中资源的函数
-        :param handler_lifecycle: setup-->handler-->handler...-->teardown 这个循环中, handler会被执行几次
-        :param processes: 进程数, 若不指定则为CPU核心数
-        :type worker_function: Callable[[Any], Any]
-        :type product_handler: Callable[[ParamTransfer, Any], None]
-        :type handler_setup: Callable[[ParamTransfer], None]
-        :type handler_teardown: Callable[[ParamTransfer], None]
-        :type processes: int
-        :type threads_per_process: int
-        :type meta: dict
         """
-        self.worker_function = worker_function
-        self.processes_count = processes or os.cpu_count() or 1
-        self.threads_per_process = threads_per_process
-        self.product_handler = product_handler or _dummy_handler
-        self.handler_setup = handler_setup
-        self.handler_teardown = handler_teardown
-        self.handler_lifecycle = handler_lifecycle
-        self.current_handler_lifecycle_count = 0  # 用于lifecycle计数 
-        self.worker_processes_pool = []  # process pool
-        self.task_queue_size = task_queue_size
-        self.product_queue_size = product_queue_size
-        self.is_task_queue_closed = False
+        logger.debug("mpms collector_container start")
+        gevent.sleep(0.5)
+        while True:
+            # taskid, result = self.result_q.get()
+            try:
+                taskid, result = self.result_q.get(timeout=1)
+            except Empty:
+                #     gevent.sleep(0.1)
+                continue
 
-        if bool(self.handler_setup) ^ bool(self.handler_teardown):
-            raise ValueError("handler_setup and handler_teardown should be set both or neither")
+            if taskid is StopIteration:
+                logger.debug("mpms collector_container got stop signal")
+                break
 
-        self.meta = ParamTransfer(self)
-        if meta is not None:
-            self.meta.update(meta)
+            _, self.meta.args, self.meta.kwargs = self.running_tasks.pop(taskid)
+            self.meta.taskid = taskid
+            self.finish_count += 1
 
-        # 初始化任务队列 进程级
-        self.task_queue = multiprocessing.JoinableQueue(self.task_queue_size)
-        # 初始化结果队列 进程级
-        self.product_queue = multiprocessing.JoinableQueue(self.product_queue_size)
+            try:
+                self.collector(self.meta, result)
+            except:
+                # 为了继续运行, 不抛错
+                logger.error("an error occurs in collector", exc_info=True)
 
-        # 初始化结果处理线程(在主进程中)
-        self.handler_thread = threading.Thread(target=self._product_receiver)
-        self.handler_thread.daemon = True
-        self.handler_thread.start()
+            # 移除meta中已经使用过的字段
+            self.meta.taskid, self.meta.args, self.meta.kwargs = None, (), {}
 
-        for i in range(self.processes_count):
-            p = multiprocessing.Process(
-                target=_producer_multi_processes,
-                args=(self.task_queue,
-                      self.product_queue,
-                      self.threads_per_process,
-                      self.worker_function
-                      )
-            )
-            p.daemon = True
-            p.start()
-            self.worker_processes_pool.append(p)
+    def close(self):
+        """
+        Close task queue
+        """
 
-
-# alias
-MPMS = MultiProcessesMultiThreads
+        # 在任务队列尾部加入结束信号来关闭任务队列
+        for i in range(self.processes_count * self.threads_count):
+            # for i in range(self.processes_count):
+            self.task_q.put_nowait((StopIteration, (), {}))
+        # self.task_q.close()
+        self.task_queue_closed = True
