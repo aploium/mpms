@@ -20,13 +20,7 @@ setup(
     author_email=AUTHOR_EMAIL,
     url=URL,
     packages=find_packages(),
-    package_dir={
-        "mpms": "mpms",
-    },
-    package_data={
-        "mpms": ["*.json", "*.txt", "*.csv"]
-    },
-    include_package_data=True,
+    py_modules=['mpms'],
     platforms="any",
     zip_safe=False,
     classifiers=[

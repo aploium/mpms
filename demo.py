@@ -1,6 +1,6 @@
 # coding=utf-8
 """
-Do parallel python works easily in multithreads in multiprocesses (at least up to 1000 or 2000 total threads!)
+Do parallel python works easily in multithreads in multiprocesses
 一个简单的多进程-多线程工作框架
 
 Work model:
@@ -33,13 +33,14 @@ Processes:5 Threads_per_process:10 Total_threads:50 TotalTime: 8.134965896606445
 Processes:3 Threads_per_process:3 Total_threads:9 TotalTime: 44.83632779121399
 Processes:1 Threads_per_process:1 Total_threads:1 TotalTime: 401.3383722305298
 """
+from __future__ import unicode_literals, print_function
 from pprint import pprint
 from time import time, sleep
 
-from mpms import MultiProcessesMultiThreads, ParamTransfer
+from mpms import MPMS, Meta
 
 
-def worker(arg, t):
+def worker(index, t=None):
     """
     Worker function, accept task parameters and do actual work
     should be able to accept at least one arg
@@ -49,15 +50,16 @@ def worker(arg, t):
     总是工作在外部进程的线程中 (即不工作在主进程中)
     """
     sleep(0.2)  # delay 0.2 second
-    print(arg, t)
+    print(index, t)
 
     # worker's return value will be added to product queue, waiting handler to handle
     # you can return any type here (Included the None , of course)
-    # worker函数的返回值会被加入到队列中,供handler依次处理,返回值允许任何类型 (包含None)
-    return arg, "hello world"
+    # worker函数的返回值会被加入到队列中,供handler依次处理,返回值允许除了 StopIteration 以外的任何类型
+    return index, "hello world"
 
 
-def handler(meta, arg, string):
+# noinspection PyStatementEffect
+def collector(meta, result):
     """
     Accept and handle worker's product
     It must have at least one arg, because any function in python will return value (maybe None)
@@ -69,27 +71,22 @@ def handler(meta, arg, string):
     如果需要多线程handler,可以新建第二个多线程实例然后把它接收到的参数传入第二个实例的工作队列
     handler必须能接受worker给出的参数
     即使worker无显示返回值(即没有return)也应该写一个参数来接收None
-    :type meta: ParamTransfer
+
+    Args:
+        meta (Meta): meta信息, 详见 Meta 的docstring
+        result (Any|Exception):
+            worker的返回值, 若worker出错, 则返回对应的 Exception
     """
-
-    print("received", arg, string, time())
-    pprint(meta)
-    print(meta.task)  # meta.task 中保存的是当前的任务参数, 即对应的worker接收到的东西
-
-
-# IMPORTANT:
-# any code outside the main() will be executed in EVERY sub processes
-# 在main()外的代码会在[每一个子进程]中被执行一遍
-SOME_GLOBAL_CODES = None
-print("Hi,I will be executed many times~")  # You will see this many times
+    if isinstance(result, Exception):
+        return
+    index, t = result
+    print("received", index, t, time())
+    meta.taskid, meta.args, meta.kwargs  # 分别为此任务的 taskid 和 传入的 args kwargs
+    meta['want']  # 在 main 中传入的meta字典中的参数
+    meta.mpms  # meta.mpms 中保存的是当前的 MPMS 实例
 
 
-# If you want some code was just executed one time in main thread,
-# please put them into the main() function
-# 只有主进程运行的代码[必须]包含在下面这样的main()里
-# 否则会每个子进程都会执行一遍(意思就是会执行好多遍)
 def main():
-    print("Hi,I will only be shown one time~")
     results = ""
     # we will run the benchmarks several times using the following params
     # 下面这些值用于多次运行,看时间
@@ -103,19 +100,20 @@ def main():
     )
     for processes, threads_per_process in test_params:
         # Init the poll  # 初始化
-        m = MultiProcessesMultiThreads(
-            worker,  # worker function
-            handler,  # handler function
+        m = MPMS(
+            worker,
+            collector,
             processes=processes,  # optional, how many processes, default value is your cpu core number
-            threads_per_process=threads_per_process,  # optional, how many threads per process, default is 2
+            threads=threads_per_process,  # optional, how many threads per process, default is 2
             meta={"any": 1, "dict": "you", "want": {"pass": "to"}, "worker": 0.5},
         )
+        m.start()  # start and fork subprocess
         start_time = time()  # when we started  # 记录开始时间
 
         # put task parameters into the task queue, 2000 total tasks
         # 把任务加入任务队列,一共2000次
         for i in range(2000):
-            m.put([i, time()])
+            m.put(i, t=time())
 
         # optional, close the task queue. queue will be auto closed when join()
         # 关闭任务队列,可选. 在join()的时候会自动关闭
@@ -131,7 +129,9 @@ def main():
                    + " Total_threads:" + str(processes * threads_per_process) \
                    + " TotalTime: " + str(time() - start_time) + "\n"
         print(results)
-        input("Press ENTER to continue(or exit)")
+
+        print('sleeping 5s before next')
+        sleep(5)
 
 
 if __name__ == '__main__':
