@@ -4,22 +4,24 @@ from __future__ import absolute_import, division, unicode_literals
 
 import multiprocessing
 import os
+import queue
 import threading
 import logging
 import weakref
+import time
 
 try:
     from typing import Callable, Any, Union
 except:
     pass
 
-__ALL__ = ["GMP", "Meta"]
+__ALL__ = ["MPMS", "Meta"]
 
-VERSION = (2, 0, 0, 0)
+VERSION = (2, 1, 0, 0)
 VERSION_STR = "{}.{}.{}.{}".format(*VERSION)
 
 
-def _worker_container(task_q, result_q, func):
+def _worker_container(task_q, result_q, func, counter, lifecycle):
     """
     Args:
         result_q (multiprocessing.Queue|None)
@@ -29,6 +31,12 @@ def _worker_container(task_q, result_q, func):
     logging.debug('mpms worker %s starting', _th_name)
 
     while True:
+        if lifecycle:
+            counter["c"] += 1
+            if counter["c"] >= lifecycle:
+                logging.debug('mpms worker thread %s reach lifecycle, exit', _th_name)
+                break
+
         taskid, args, kwargs = task_q.get()
         # logging.debug("mpms worker %s got taskid:%s", _th_name, taskid)
 
@@ -48,7 +56,7 @@ def _worker_container(task_q, result_q, func):
                 result_q.put_nowait((taskid, result))
 
 
-def _slaver(task_q, result_q, threads, func):
+def _slaver(task_q, result_q, threads, func, lifecycle):
     """
     接收与多进程任务并分发给子线程
 
@@ -63,9 +71,10 @@ def _slaver(task_q, result_q, threads, func):
     logging.debug("mpms subprocess %s start. threads:%s", _process_name, threads)
 
     pool = []
+    counter = {"c": 0}
     for i in range(threads):
         th = threading.Thread(target=_worker_container,
-                              args=(task_q, result_q, func),
+                              args=(task_q, result_q, func, counter, lifecycle),
                               name="{}#{}".format(_process_name, i + 1)
                               )
         th.daemon = True
@@ -168,8 +177,10 @@ class MPMS(object):
             worker,
             collector=None,
             processes=None, threads=2,
-            task_queue_maxsize=-1,
-            meta=None
+            task_queue_maxsize=None,
+            meta=None,
+            lifecycle=None,
+            subproc_check_interval=3,
     ):
 
         self.worker = worker
@@ -181,15 +192,17 @@ class MPMS(object):
         self.total_count = 0  # 总任务数
         self.finish_count = 0  # 已完成的任务数
 
-        self.processes_pool = []
-        self.task_queue_maxsize = task_queue_maxsize
+        self.processes_pool = {}
+
+        self.task_queue_maxsize = max(self.processes_count * self.threads_count * 3 + 30, task_queue_maxsize or 0)
         self.task_queue_closed = False
 
         self.meta = Meta(self)
         if meta is not None:
             self.meta.update(meta)
 
-        self.task_q = multiprocessing.Queue(maxsize=task_queue_maxsize)
+        self.task_q = multiprocessing.Queue(maxsize=self.task_queue_maxsize)
+        self._process_count = 0
 
         if self.collector:
             self.result_q = multiprocessing.Queue()
@@ -198,9 +211,45 @@ class MPMS(object):
 
         self.collector_thread = None
 
-        self.worker_processes_pool = []
+        self.worker_processes_pool = {}
 
         self.running_tasks = {}
+        self.lifecycle = lifecycle
+        self.subproc_check_interval = subproc_check_interval
+        self._subproc_last_check = time.time()
+
+    def _start_one_slaver_process(self):
+        self._process_count += 1
+        name = "mpms-{}".format(self._process_count)
+        p = multiprocessing.Process(
+            target=_slaver,
+            args=(self.task_q, self.result_q,
+                  self.threads_count, self.worker,
+                  self.lifecycle
+                  ),
+            name=name
+        )
+        p.daemon = True
+        logging.debug('mpms subprocess %s starting', name)
+        p.start()
+        self.worker_processes_pool[name] = p
+
+    def _subproc_check(self):
+        if time.time() - self._subproc_last_check < self.subproc_check_interval:
+            return
+        self._subproc_last_check = time.time()
+        for name, p in tuple(self.worker_processes_pool.items()):  # type:str, multiprocessing.Process
+            if p.is_alive():
+                continue
+            logging.info('mpms subprocess %s dead, restarting', name)
+            p.close()
+            del self.worker_processes_pool[name]
+            if len(self.running_tasks) <= len(self.processes_pool):
+                continue
+            self._start_one_slaver_process()
+            if self.task_queue_closed:
+                for _ in range(self.threads_count):
+                    self.task_q.put((StopIteration, (), {}))
 
     def start(self):
         if self.worker_processes_pool:
@@ -208,15 +257,7 @@ class MPMS(object):
         logging.debug("mpms starting worker subprocess")
 
         for i in range(self.processes_count):
-            p = multiprocessing.Process(
-                target=_slaver,
-                args=(self.task_q, self.result_q,
-                      self.threads_count, self.worker),
-                name="mpms-{}".format(i + 1)
-            )
-            p.daemon = True
-            p.start()
-            self.worker_processes_pool.append(p)
+            self._start_one_slaver_process()
 
         if self.collector is not None:
             logging.debug("mpms starting collector thread")
@@ -242,7 +283,15 @@ class MPMS(object):
         if self.collector:
             self.running_tasks[taskid] = task_tuple
 
-        self.task_q.put(task_tuple)
+        self._subproc_check()
+
+        while True:
+            try:
+                self.task_q.put(task_tuple, timeout=self.subproc_check_interval)
+            except queue.Full:
+                self._subproc_check()
+            else:
+                break
         self.total_count += 1
 
     def join(self, close=True):
@@ -254,9 +303,11 @@ class MPMS(object):
             self.close()
 
         # 等待所有工作进程结束
-        for p in self.worker_processes_pool:  # type: multiprocessing.Process
-            p.join()
-            logging.debug("mpms subprocess %s %s closed", p.name, p.pid)
+        while self.worker_processes_pool:
+            for name, p in list(self.worker_processes_pool.items()):  # type: multiprocessing.Process
+                p.join()
+                logging.debug("mpms subprocess %s %s closed", p.name, p.pid)
+                del self.worker_processes_pool[name]
         logging.debug("mpms all worker completed")
 
         if self.collector:
@@ -301,6 +352,6 @@ class MPMS(object):
         """
 
         # 在任务队列尾部加入结束信号来关闭任务队列
-        for i in range(self.processes_count * self.threads_count):
+        for i in range(self._process_count * self.threads_count):
             self.task_q.put((StopIteration, (), {}))
         self.task_queue_closed = True
