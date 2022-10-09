@@ -4,8 +4,8 @@ Simple python Multiprocesses-Multithreads queue
 (自用, ap不为生产环境下造成的任何损失和灵异现象负责)
   
 在多个进程的多个线程的 worker 中完成耗时的任务, 并在主进程的 collector 中处理结果
-  
-支持python 2.7/3.4+
+
+支持python 3.8+
 
 ### install
 
