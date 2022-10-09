@@ -20,6 +20,8 @@ __ALL__ = ["MPMS", "Meta"]
 VERSION = (2, 1, 0, 0)
 VERSION_STR = "{}.{}.{}.{}".format(*VERSION)
 
+logger = logging.getLogger(__name__)
+
 
 def _worker_container(task_q, result_q, func, counter, lifecycle):
     """
@@ -28,30 +30,40 @@ def _worker_container(task_q, result_q, func, counter, lifecycle):
     """
     _th_name = threading.current_thread().name
 
-    logging.debug('mpms worker %s starting', _th_name)
+    # maybe fix some logging deadlock?
+    try:
+        logging._after_at_fork_child_reinit_locks()
+    except:
+        pass
+    try:
+        logging._releaseLock()
+    except:
+        pass
+
+    logger.debug('mpms worker %s starting', _th_name)
 
     while True:
         if lifecycle:
             counter["c"] += 1
             if counter["c"] >= lifecycle:
-                logging.debug('mpms worker thread %s reach lifecycle, exit', _th_name)
+                logger.debug('mpms worker thread %s reach lifecycle, exit', _th_name)
                 break
 
         taskid, args, kwargs = task_q.get()
-        # logging.debug("mpms worker %s got taskid:%s", _th_name, taskid)
+        # logger.debug("mpms worker %s got taskid:%s", _th_name, taskid)
 
         if taskid is StopIteration:
-            logging.debug("mpms worker %s got stop signal", _th_name)
+            logger.debug("mpms worker %s got stop signal", _th_name)
             break
 
         try:
             result = func(*args, **kwargs)
         except Exception as e:
-            logging.error("Unhandled error %s in worker thread, taskid: %s", e, taskid, exc_info=True)
+            logger.error("Unhandled error %s in worker thread, taskid: %s", e, taskid, exc_info=True)
             if result_q is not None:
                 result_q.put_nowait((taskid, e))
         else:
-            # logging.debug("done %s", taskid)
+            # logger.debug("done %s", taskid)
             if result_q is not None:
                 result_q.put_nowait((taskid, result))
 
@@ -68,7 +80,7 @@ def _slaver(task_q, result_q, threads, func, lifecycle):
     """
     _process_name = "{}(PID:{})".format(multiprocessing.current_process().name,
                                         multiprocessing.current_process().pid, )
-    logging.debug("mpms subprocess %s start. threads:%s", _process_name, threads)
+    logger.debug("mpms subprocess %s start. threads:%s", _process_name, threads)
 
     pool = []
     counter = {"c": 0}
@@ -85,7 +97,7 @@ def _slaver(task_q, result_q, threads, func, lifecycle):
     for th in pool:
         th.join()
 
-    logging.debug("mpms subprocess %s exiting", _process_name)
+    logger.debug("mpms subprocess %s exiting", _process_name)
 
 
 def get_cpu_count():
@@ -230,7 +242,7 @@ class MPMS(object):
             name=name
         )
         p.daemon = True
-        logging.debug('mpms subprocess %s starting', name)
+        logger.debug('mpms subprocess %s starting', name)
         p.start()
         self.worker_processes_pool[name] = p
 
@@ -241,31 +253,45 @@ class MPMS(object):
         for name, p in tuple(self.worker_processes_pool.items()):  # type:str, multiprocessing.Process
             if p.is_alive():
                 continue
-            logging.info('mpms subprocess %s dead, restarting', name)
+            logger.info('mpms subprocess %s dead, restarting', name)
+            p.terminate()
             p.close()
             del self.worker_processes_pool[name]
             if len(self.running_tasks) <= len(self.processes_pool):
                 continue
+            time.sleep(0.1)
             self._start_one_slaver_process()
+            time.sleep(0.1)
+
+            # maybe fix some logging deadlock?
+            try:
+                logging._after_at_fork_child_reinit_locks()
+            except:
+                pass
+            try:
+                logging._releaseLock()
+            except:
+                pass
             if self.task_queue_closed:
                 for _ in range(self.threads_count):
                     self.task_q.put((StopIteration, (), {}))
+            break
 
     def start(self):
         if self.worker_processes_pool:
             raise RuntimeError('You can only start ONCE!')
-        logging.debug("mpms starting worker subprocess")
+        logger.debug("mpms starting worker subprocess")
 
         for i in range(self.processes_count):
             self._start_one_slaver_process()
 
         if self.collector is not None:
-            logging.debug("mpms starting collector thread")
+            logger.debug("mpms starting collector thread")
             self.collector_thread = threading.Thread(target=self._collector_container, name='mpms-collector')
             self.collector_thread.daemon = True
             self.collector_thread.start()
         else:
-            logging.debug("mpms no collector given, skip collector thread")
+            logger.debug("mpms no collector given, skip collector thread")
 
     def put(self, *args, **kwargs):
         """
@@ -306,15 +332,15 @@ class MPMS(object):
         while self.worker_processes_pool:
             for name, p in list(self.worker_processes_pool.items()):  # type: multiprocessing.Process
                 p.join()
-                logging.debug("mpms subprocess %s %s closed", p.name, p.pid)
+                logger.debug("mpms subprocess %s %s closed", p.name, p.pid)
                 del self.worker_processes_pool[name]
-        logging.debug("mpms all worker completed")
+        logger.debug("mpms all worker completed")
 
         if self.collector:
             self.result_q.put_nowait((StopIteration, None))  # 在结果队列中加入退出指示信号
             self.collector_thread.join()  # 等待处理线程结束
 
-        logging.debug("mpms join completed")
+        logger.debug("mpms join completed")
 
     def _gen_taskid(self):
         return "mpms{}".format(self.total_count)
@@ -324,13 +350,13 @@ class MPMS(object):
         接受子进程传入的结果,并把它发送到master_product_handler()中
 
         """
-        logging.debug("mpms collector start")
+        logger.debug("mpms collector start")
 
         while True:
             taskid, result = self.result_q.get()
 
             if taskid is StopIteration:
-                logging.debug("mpms collector got stop signal")
+                logger.debug("mpms collector got stop signal")
                 break
 
             _, self.meta.args, self.meta.kwargs = self.running_tasks.pop(taskid)
@@ -341,7 +367,7 @@ class MPMS(object):
                 self.collector(self.meta, result)
             except:
                 # 为了继续运行, 不抛错
-                logging.error("an error occurs in collector, task: %s", taskid, exc_info=True)
+                logger.error("an error occurs in collector, task: %s", taskid, exc_info=True)
 
             # 移除meta中已经使用过的字段
             self.meta.taskid, self.meta.args, self.meta.kwargs = None, (), {}
