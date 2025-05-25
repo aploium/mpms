@@ -19,7 +19,7 @@ else:
 
 __ALL__ = ["MPMS", "Meta"]
 
-VERSION = (2, 2, 0, 0)
+VERSION = (2, 3, 0, 0)
 VERSION_STR = "{}.{}.{}.{}".format(*VERSION)
 
 logger = logging.getLogger(__name__)
