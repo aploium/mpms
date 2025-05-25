@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 TaskTuple = tuple[t.Any, tuple[t.Any, ...], dict[str, t.Any]]  # (taskid, args, kwargs)
 WorkerFunc = t.Callable[..., t.Any]
 CollectorFunc = t.Callable[['Meta', t.Any], None]
+InitializerFunc = t.Callable[..., None]  # initializer function type
 
 
 def _worker_container(
@@ -36,11 +37,15 @@ def _worker_container(
     func: WorkerFunc,
     counter: dict[str, int],
     lifecycle: int | None,
-    lifecycle_duration: float | None
+    lifecycle_duration: float | None,
+    initializer: InitializerFunc | None,
+    initargs: tuple[t.Any, ...]
 ) -> None:
     """
     Args:
         result_q (multiprocessing.Queue|None)
+        initializer (InitializerFunc|None): 可选的初始化函数
+        initargs (tuple): 初始化函数的参数
     """
     _th_name = threading.current_thread().name
 
@@ -55,6 +60,15 @@ def _worker_container(
         pass
 
     logger.debug('mpms worker %s starting', _th_name)
+    
+    # 调用初始化函数
+    if initializer is not None:
+        try:
+            initializer(*initargs)
+            logger.debug('mpms worker %s initialized successfully', _th_name)
+        except Exception as e:
+            logger.error('mpms worker %s initialization failed: %s', _th_name, e, exc_info=True)
+            return  # 初始化失败，退出线程
     
     # 记录线程开始时间
     start_time = time.time() if lifecycle_duration else None
@@ -100,7 +114,11 @@ def _slaver(
     threads: int,
     func: WorkerFunc,
     lifecycle: int | None,
-    lifecycle_duration: float | None
+    lifecycle_duration: float | None,
+    process_initializer: InitializerFunc | None,
+    process_initargs: tuple[t.Any, ...],
+    thread_initializer: InitializerFunc | None,
+    thread_initargs: tuple[t.Any, ...]
 ) -> None:
     """
     接收与多进程任务并分发给子线程
@@ -112,15 +130,29 @@ def _slaver(
         func (Callable)
         lifecycle (int|None): 基于任务计数的生命周期
         lifecycle_duration (float|None): 基于时间的生命周期（秒）
+        process_initializer (InitializerFunc|None): 进程初始化函数
+        process_initargs (tuple): 进程初始化函数的参数
+        thread_initializer (InitializerFunc|None): 线程初始化函数
+        thread_initargs (tuple): 线程初始化函数的参数
     """
     _process_name = "{}(PID:{})".format(multiprocessing.current_process().name,
                                         multiprocessing.current_process().pid, )
     logger.debug("mpms subprocess %s start. threads:%s", _process_name, threads)
+    
+    # 调用进程初始化函数
+    if process_initializer is not None:
+        try:
+            process_initializer(*process_initargs)
+            logger.debug('mpms subprocess %s initialized successfully', _process_name)
+        except Exception as e:
+            logger.error('mpms subprocess %s initialization failed: %s', _process_name, e, exc_info=True)
+            return  # 初始化失败，退出进程
 
     pool = []
     for i in range(threads):
         th = threading.Thread(target=_worker_container,
-                              args=(task_q, result_q, func, None, lifecycle, lifecycle_duration),
+                              args=(task_q, result_q, func, None, lifecycle, lifecycle_duration, 
+                                    thread_initializer, thread_initargs),
                               name="{}#{}".format(_process_name, i + 1)
                               )
         th.daemon = True
@@ -199,12 +231,23 @@ class MPMS(object):
             if isinstance(result, Exception): # 当worker出错时的exception会在result中返回
                 return
             foo, bar = result
+            
+        def process_init():
+            # 在每个进程启动时执行
+            print(f"Process {os.getpid()} initialized")
+            
+        def thread_init(process_name):
+            # 在每个线程启动时执行
+            print(f"Thread {threading.current_thread().name} in process {process_name} initialized")
 
         def main():
             m = MPMS(
                 worker,
                 collector, # optional
                 processes=2, threads=2, # optional
+                process_initializer=process_init,  # optional
+                thread_initializer=thread_init,  # optional
+                thread_initargs=(multiprocessing.current_process().name,)  # optional
                 )
             m.start()
             for i in range(100):
@@ -223,12 +266,17 @@ class MPMS(object):
         lifecycle (int|None): 基于任务计数的生命周期，工作线程处理指定数量任务后退出
         lifecycle_duration (float|None): 基于时间的生命周期（秒），工作线程运行指定时间后退出
         subproc_check_interval (float): 子进程检查间隔（秒）
+        process_initializer (Callable|None): 进程初始化函数，在每个工作进程启动时调用一次
+        process_initargs (tuple): 传递给进程初始化函数的参数
+        thread_initializer (Callable|None): 线程初始化函数，在每个工作线程启动时调用一次
+        thread_initargs (tuple): 传递给线程初始化函数的参数
 
         total_count (int): 总任务数
         finish_count (int): 已完成的任务数
 
     Notes:
         lifecycle 和 lifecycle_duration 同时生效，满足任一条件都会触发工作线程退出
+        如果初始化函数抛出异常，对应的进程或线程将退出，不会处理任何任务
 
     """
 
@@ -252,6 +300,10 @@ class MPMS(object):
     lifecycle_duration: float | None
     subproc_check_interval: float
     _subproc_last_check: float
+    process_initializer: InitializerFunc | None
+    process_initargs: tuple[t.Any, ...]
+    thread_initializer: InitializerFunc | None
+    thread_initargs: tuple[t.Any, ...]
 
     def __init__(
             self,
@@ -264,6 +316,10 @@ class MPMS(object):
             lifecycle: int | None = None,
             lifecycle_duration: float | None = None,
             subproc_check_interval: float = 3,
+            process_initializer: InitializerFunc | None = None,
+            process_initargs: tuple[t.Any, ...] = (),
+            thread_initializer: InitializerFunc | None = None,
+            thread_initargs: tuple[t.Any, ...] = (),
     ) -> None:
 
         self.worker = worker
@@ -301,6 +357,12 @@ class MPMS(object):
         self.lifecycle_duration = lifecycle_duration
         self.subproc_check_interval = subproc_check_interval
         self._subproc_last_check = time.time()
+        
+        # 初始化函数相关属性
+        self.process_initializer = process_initializer
+        self.process_initargs = process_initargs
+        self.thread_initializer = thread_initializer
+        self.thread_initargs = thread_initargs
 
     def _start_one_slaver_process(self) -> None:
         self._process_count += 1
@@ -309,7 +371,9 @@ class MPMS(object):
             target=_slaver,
             args=(self.task_q, self.result_q,
                   self.threads_count, self.worker,
-                  self.lifecycle, self.lifecycle_duration
+                  self.lifecycle, self.lifecycle_duration,
+                  self.process_initializer, self.process_initargs,
+                  self.thread_initializer, self.thread_initargs
                   ),
             name=name
         )
