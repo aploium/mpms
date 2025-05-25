@@ -29,6 +29,7 @@ TaskTuple = tuple[t.Any, tuple[t.Any, ...], dict[str, t.Any]]  # (taskid, args, 
 WorkerFunc = t.Callable[..., t.Any]
 CollectorFunc = t.Callable[['Meta', t.Any], None]
 InitializerFunc = t.Callable[..., None]  # initializer function type
+FinalizerFunc = t.Callable[..., None]  # finalizer function type
 
 
 def _worker_container(
@@ -39,13 +40,17 @@ def _worker_container(
     lifecycle: int | None,
     lifecycle_duration: float | None,
     initializer: InitializerFunc | None,
-    initargs: tuple[t.Any, ...]
+    initargs: tuple[t.Any, ...],
+    finalizer: FinalizerFunc | None,
+    finargs: tuple[t.Any, ...]
 ) -> None:
     """
     Args:
         result_q (multiprocessing.Queue|None)
         initializer (InitializerFunc|None): 可选的初始化函数
         initargs (tuple): 初始化函数的参数
+        finalizer (FinalizerFunc|None): 可选的清理函数
+        finargs (tuple): 清理函数的参数
     """
     _th_name = threading.current_thread().name
 
@@ -107,6 +112,14 @@ def _worker_container(
             logger.debug('mpms worker thread %s reach lifecycle count %d, exit', _th_name, lifecycle)
             break
 
+    # 调用清理函数
+    if finalizer is not None:
+        try:
+            finalizer(*finargs)
+            logger.debug('mpms worker %s finalized successfully', _th_name)
+        except Exception as e:
+            logger.error('mpms worker %s finalization failed: %s', _th_name, e, exc_info=True)
+
 
 def _slaver(
     task_q: MPQueue,
@@ -118,7 +131,11 @@ def _slaver(
     process_initializer: InitializerFunc | None,
     process_initargs: tuple[t.Any, ...],
     thread_initializer: InitializerFunc | None,
-    thread_initargs: tuple[t.Any, ...]
+    thread_initargs: tuple[t.Any, ...],
+    process_finalizer: FinalizerFunc | None,
+    process_finargs: tuple[t.Any, ...],
+    thread_finalizer: FinalizerFunc | None,
+    thread_finargs: tuple[t.Any, ...]
 ) -> None:
     """
     接收与多进程任务并分发给子线程
@@ -134,6 +151,10 @@ def _slaver(
         process_initargs (tuple): 进程初始化函数的参数
         thread_initializer (InitializerFunc|None): 线程初始化函数
         thread_initargs (tuple): 线程初始化函数的参数
+        process_finalizer (FinalizerFunc|None): 进程清理函数
+        process_finargs (tuple): 进程清理函数的参数
+        thread_finalizer (FinalizerFunc|None): 线程清理函数
+        thread_finargs (tuple): 线程清理函数的参数
     """
     _process_name = "{}(PID:{})".format(multiprocessing.current_process().name,
                                         multiprocessing.current_process().pid, )
@@ -152,7 +173,7 @@ def _slaver(
     for i in range(threads):
         th = threading.Thread(target=_worker_container,
                               args=(task_q, result_q, func, None, lifecycle, lifecycle_duration, 
-                                    thread_initializer, thread_initargs),
+                                    thread_initializer, thread_initargs, thread_finalizer, thread_finargs),
                               name="{}#{}".format(_process_name, i + 1)
                               )
         th.daemon = True
@@ -162,6 +183,14 @@ def _slaver(
 
     for th in pool:
         th.join()
+
+    # 调用进程清理函数
+    if process_finalizer is not None:
+        try:
+            process_finalizer(*process_finargs)
+            logger.debug('mpms subprocess %s finalized successfully', _process_name)
+        except Exception as e:
+            logger.error('mpms subprocess %s finalization failed: %s', _process_name, e, exc_info=True)
 
     logger.debug("mpms subprocess %s exiting", _process_name)
 
@@ -239,6 +268,14 @@ class MPMS(object):
         def thread_init(process_name):
             # 在每个线程启动时执行
             print(f"Thread {threading.current_thread().name} in process {process_name} initialized")
+            
+        def process_cleanup():
+            # 在每个进程退出前执行
+            print(f"Process {os.getpid()} cleaning up")
+            
+        def thread_cleanup(process_name):
+            # 在每个线程退出前执行
+            print(f"Thread {threading.current_thread().name} in process {process_name} cleaning up")
 
         def main():
             m = MPMS(
@@ -247,7 +284,10 @@ class MPMS(object):
                 processes=2, threads=2, # optional
                 process_initializer=process_init,  # optional
                 thread_initializer=thread_init,  # optional
-                thread_initargs=(multiprocessing.current_process().name,)  # optional
+                thread_initargs=(multiprocessing.current_process().name,),  # optional
+                process_finalizer=process_cleanup,  # optional
+                thread_finalizer=thread_cleanup,  # optional
+                thread_finargs=(multiprocessing.current_process().name,)  # optional
                 )
             m.start()
             for i in range(100):
@@ -270,6 +310,10 @@ class MPMS(object):
         process_initargs (tuple): 传递给进程初始化函数的参数
         thread_initializer (Callable|None): 线程初始化函数，在每个工作线程启动时调用一次
         thread_initargs (tuple): 传递给线程初始化函数的参数
+        process_finalizer (Callable|None): 进程清理函数，在每个工作进程退出前调用一次
+        process_finargs (tuple): 传递给进程清理函数的参数
+        thread_finalizer (Callable|None): 线程清理函数，在每个工作线程退出前调用一次
+        thread_finargs (tuple): 传递给线程清理函数的参数
 
         total_count (int): 总任务数
         finish_count (int): 已完成的任务数
@@ -277,6 +321,8 @@ class MPMS(object):
     Notes:
         lifecycle 和 lifecycle_duration 同时生效，满足任一条件都会触发工作线程退出
         如果初始化函数抛出异常，对应的进程或线程将退出，不会处理任何任务
+        清理函数在进程或线程正常退出前调用（包括因生命周期限制而退出的情况）
+        如果清理函数抛出异常，将记录错误日志但不影响退出流程
 
     """
 
@@ -304,6 +350,10 @@ class MPMS(object):
     process_initargs: tuple[t.Any, ...]
     thread_initializer: InitializerFunc | None
     thread_initargs: tuple[t.Any, ...]
+    process_finalizer: FinalizerFunc | None
+    process_finargs: tuple[t.Any, ...]
+    thread_finalizer: FinalizerFunc | None
+    thread_finargs: tuple[t.Any, ...]
 
     def __init__(
             self,
@@ -320,6 +370,10 @@ class MPMS(object):
             process_initargs: tuple[t.Any, ...] = (),
             thread_initializer: InitializerFunc | None = None,
             thread_initargs: tuple[t.Any, ...] = (),
+            process_finalizer: FinalizerFunc | None = None,
+            process_finargs: tuple[t.Any, ...] = (),
+            thread_finalizer: FinalizerFunc | None = None,
+            thread_finargs: tuple[t.Any, ...] = (),
     ) -> None:
 
         self.worker = worker
@@ -363,6 +417,10 @@ class MPMS(object):
         self.process_initargs = process_initargs
         self.thread_initializer = thread_initializer
         self.thread_initargs = thread_initargs
+        self.process_finalizer = process_finalizer
+        self.process_finargs = process_finargs
+        self.thread_finalizer = thread_finalizer
+        self.thread_finargs = thread_finargs
 
     def _start_one_slaver_process(self) -> None:
         self._process_count += 1
@@ -373,7 +431,9 @@ class MPMS(object):
                   self.threads_count, self.worker,
                   self.lifecycle, self.lifecycle_duration,
                   self.process_initializer, self.process_initargs,
-                  self.thread_initializer, self.thread_initargs
+                  self.thread_initializer, self.thread_initargs,
+                  self.process_finalizer, self.process_finargs,
+                  self.thread_finalizer, self.thread_finargs
                   ),
             name=name
         )
