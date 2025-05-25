@@ -9,11 +9,7 @@ import threading
 import logging
 import weakref
 import time
-
-try:
-    from typing import Callable, Any, Union
-except:
-    pass
+import typing as t
 
 __ALL__ = ["MPMS", "Meta"]
 
@@ -22,8 +18,19 @@ VERSION_STR = "{}.{}.{}.{}".format(*VERSION)
 
 logger = logging.getLogger(__name__)
 
+# Type aliases for clarity
+TaskTuple = tuple[t.Any, tuple[t.Any, ...], dict[str, t.Any]]  # (taskid, args, kwargs)
+WorkerFunc = t.Callable[..., t.Any]
+CollectorFunc = t.Callable[['Meta', t.Any], None]
 
-def _worker_container(task_q, result_q, func, counter, lifecycle):
+
+def _worker_container(
+    task_q: multiprocessing.Queue[TaskTuple],
+    result_q: multiprocessing.Queue[tuple[t.Any, t.Any]] | None,
+    func: WorkerFunc,
+    counter: dict[str, int],
+    lifecycle: int | None
+) -> None:
     """
     Args:
         result_q (multiprocessing.Queue|None)
@@ -68,7 +75,13 @@ def _worker_container(task_q, result_q, func, counter, lifecycle):
                 result_q.put_nowait((taskid, result))
 
 
-def _slaver(task_q, result_q, threads, func, lifecycle):
+def _slaver(
+    task_q: multiprocessing.Queue[TaskTuple],
+    result_q: multiprocessing.Queue[tuple[t.Any, t.Any]] | None,
+    threads: int,
+    func: WorkerFunc,
+    lifecycle: int | None
+) -> None:
     """
     接收与多进程任务并分发给子线程
 
@@ -100,7 +113,7 @@ def _slaver(task_q, result_q, threads, func, lifecycle):
     logger.debug("mpms subprocess %s exiting", _process_name)
 
 
-def get_cpu_count():
+def get_cpu_count() -> int:
     try:
         if hasattr(os, "cpu_count"):
             return os.cpu_count()
@@ -110,7 +123,7 @@ def get_cpu_count():
         return 0
 
 
-class Meta(dict):
+class Meta(dict[str, t.Any]):
     """
     用于存储单次任务信息以供 collector 使用
 
@@ -126,7 +139,12 @@ class Meta(dict):
         可以用于在主程序中传递一些环境变量给 collector
     """
 
-    def __init__(self, mpms):
+    mpms: weakref.ProxyType['MPMS']
+    args: tuple[t.Any, ...]
+    kwargs: dict[str, t.Any]
+    taskid: str | None
+
+    def __init__(self, mpms: 'MPMS') -> None:
         super(Meta, self).__init__()
         self.mpms = weakref.proxy(mpms)  # type: MPMS
         self.args = ()
@@ -134,7 +152,7 @@ class Meta(dict):
         self.taskid = None
 
     @property
-    def self(self):
+    def self(self) -> 'MPMS':
         """
         an alias for .mpms
 
@@ -184,16 +202,37 @@ class MPMS(object):
 
     """
 
+    worker: WorkerFunc
+    collector: CollectorFunc | None
+    processes_count: int
+    threads_count: int
+    total_count: int
+    finish_count: int
+    processes_pool: dict[str, t.Any]  # Not used in the code, might be legacy
+    task_queue_maxsize: int
+    task_queue_closed: bool
+    meta: Meta
+    task_q: multiprocessing.Queue[TaskTuple]
+    _process_count: int
+    result_q: multiprocessing.Queue[tuple[t.Any, t.Any]] | None
+    collector_thread: threading.Thread | None
+    worker_processes_pool: dict[str, multiprocessing.Process]
+    running_tasks: dict[str, TaskTuple]
+    lifecycle: int | None
+    subproc_check_interval: float
+    _subproc_last_check: float
+
     def __init__(
             self,
-            worker,
-            collector=None,
-            processes=None, threads=2,
-            task_queue_maxsize=None,
-            meta=None,
-            lifecycle=None,
-            subproc_check_interval=3,
-    ):
+            worker: WorkerFunc,
+            collector: CollectorFunc | None = None,
+            processes: int | None = None,
+            threads: int = 2,
+            task_queue_maxsize: int | None = None,
+            meta: Meta | dict[str, t.Any] | None = None,
+            lifecycle: int | None = None,
+            subproc_check_interval: float = 3,
+    ) -> None:
 
         self.worker = worker
         self.collector = collector
@@ -230,7 +269,7 @@ class MPMS(object):
         self.subproc_check_interval = subproc_check_interval
         self._subproc_last_check = time.time()
 
-    def _start_one_slaver_process(self):
+    def _start_one_slaver_process(self) -> None:
         self._process_count += 1
         name = "mpms-{}".format(self._process_count)
         p = multiprocessing.Process(
@@ -246,7 +285,7 @@ class MPMS(object):
         p.start()
         self.worker_processes_pool[name] = p
 
-    def _subproc_check(self):
+    def _subproc_check(self) -> None:
         if time.time() - self._subproc_last_check < self.subproc_check_interval:
             return
         self._subproc_last_check = time.time()
@@ -277,7 +316,7 @@ class MPMS(object):
                     self.task_q.put((StopIteration, (), {}))
             break
 
-    def start(self):
+    def start(self) -> None:
         if self.worker_processes_pool:
             raise RuntimeError('You can only start ONCE!')
         logger.debug("mpms starting worker subprocess")
@@ -293,7 +332,7 @@ class MPMS(object):
         else:
             logger.debug("mpms no collector given, skip collector thread")
 
-    def put(self, *args, **kwargs):
+    def put(self, *args: t.Any, **kwargs: t.Any) -> None:
         """
         put task params into working queue
 
@@ -320,7 +359,7 @@ class MPMS(object):
                 break
         self.total_count += 1
 
-    def join(self, close=True):
+    def join(self, close: bool = True) -> None:
         """
         Wait until the works and handlers terminates.
 
@@ -342,10 +381,10 @@ class MPMS(object):
 
         logger.debug("mpms join completed")
 
-    def _gen_taskid(self):
+    def _gen_taskid(self) -> str:
         return "mpms{}".format(self.total_count)
 
-    def _collector_container(self):
+    def _collector_container(self) -> None:
         """
         接受子进程传入的结果,并把它发送到master_product_handler()中
 
@@ -372,7 +411,7 @@ class MPMS(object):
             # 移除meta中已经使用过的字段
             self.meta.taskid, self.meta.args, self.meta.kwargs = None, (), {}
 
-    def close(self):
+    def close(self) -> None:
         """
         Close task queue
         """
