@@ -7,13 +7,13 @@ Simple python Multiprocesses-Multithreads queue
 
 支持python 3.8+
 
-### install
+### Install
 
 ```shell
 pip install mpms
 ```
 
-### run
+### Quick Start
 
 ```python
 import requests
@@ -42,4 +42,35 @@ if __name__ == '__main__':
     main()
 ```
 
-更多请看 `demo.py`
+### New Features (v2.2.0)
+
+#### Lifecycle Management
+
+MPMS now supports automatic worker thread rotation with two lifecycle control methods:
+
+1. **Count-based lifecycle** (`lifecycle` parameter): Worker threads exit after processing a specified number of tasks
+2. **Time-based lifecycle** (`lifecycle_duration` parameter): Worker threads exit after running for a specified duration (in seconds)
+
+Both parameters can be used together - threads will exit when either condition is met first.
+
+```python
+# Count-based lifecycle
+m = MPMS(worker, lifecycle=100)  # Each thread exits after 100 tasks
+
+# Time-based lifecycle  
+m = MPMS(worker, lifecycle_duration=3600)  # Each thread exits after 1 hour
+
+# Combined lifecycle
+m = MPMS(worker, lifecycle=100, lifecycle_duration=3600)  # Exit on 100 tasks OR 1 hour
+```
+
+### Examples
+
+See the `examples/` directory for complete examples:
+- `examples/demo.py` - Basic usage demonstration
+- `examples/demo_lifecycle.py` - Lifecycle management features
+
+### Tests
+
+See the `tests/` directory for test scripts:
+- `tests/test_lifecycle.py` - Tests for lifecycle management features

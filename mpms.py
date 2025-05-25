@@ -10,10 +10,16 @@ import logging
 import weakref
 import time
 import typing as t
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from multiprocessing import Queue as MPQueue
+else:
+    MPQueue = t.Any
 
 __ALL__ = ["MPMS", "Meta"]
 
-VERSION = (2, 1, 0, 1)
+VERSION = (2, 2, 0, 0)
 VERSION_STR = "{}.{}.{}.{}".format(*VERSION)
 
 logger = logging.getLogger(__name__)
@@ -25,11 +31,12 @@ CollectorFunc = t.Callable[['Meta', t.Any], None]
 
 
 def _worker_container(
-    task_q: multiprocessing.Queue[TaskTuple],
-    result_q: multiprocessing.Queue[tuple[t.Any, t.Any]] | None,
+    task_q: MPQueue,
+    result_q: MPQueue | None,
     func: WorkerFunc,
     counter: dict[str, int],
-    lifecycle: int | None
+    lifecycle: int | None,
+    lifecycle_duration: float | None
 ) -> None:
     """
     Args:
@@ -48,13 +55,17 @@ def _worker_container(
         pass
 
     logger.debug('mpms worker %s starting', _th_name)
+    
+    # 记录线程开始时间
+    start_time = time.time() if lifecycle_duration else None
+    # 本地任务计数器
+    local_task_count = 0
 
     while True:
-        if lifecycle:
-            counter["c"] += 1
-            if counter["c"] >= lifecycle:
-                logger.debug('mpms worker thread %s reach lifecycle, exit', _th_name)
-                break
+        # 检查基于时间的生命周期（在获取任务前检查）
+        if lifecycle_duration and time.time() - start_time >= lifecycle_duration:
+            logger.debug('mpms worker thread %s reach lifecycle duration %.2fs, exit', _th_name, lifecycle_duration)
+            break
 
         taskid, args, kwargs = task_q.get()
         # logger.debug("mpms worker %s got taskid:%s", _th_name, taskid)
@@ -73,14 +84,23 @@ def _worker_container(
             # logger.debug("done %s", taskid)
             if result_q is not None:
                 result_q.put_nowait((taskid, result))
+        
+        # 任务成功完成后才增加计数器
+        local_task_count += 1
+        
+        # 检查基于任务计数的生命周期（在任务完成后检查）
+        if lifecycle and local_task_count >= lifecycle:
+            logger.debug('mpms worker thread %s reach lifecycle count %d, exit', _th_name, lifecycle)
+            break
 
 
 def _slaver(
-    task_q: multiprocessing.Queue[TaskTuple],
-    result_q: multiprocessing.Queue[tuple[t.Any, t.Any]] | None,
+    task_q: MPQueue,
+    result_q: MPQueue | None,
     threads: int,
     func: WorkerFunc,
-    lifecycle: int | None
+    lifecycle: int | None,
+    lifecycle_duration: float | None
 ) -> None:
     """
     接收与多进程任务并分发给子线程
@@ -90,16 +110,17 @@ def _slaver(
         result_q (multiprocessing.Queue|None)
         threads (int)
         func (Callable)
+        lifecycle (int|None): 基于任务计数的生命周期
+        lifecycle_duration (float|None): 基于时间的生命周期（秒）
     """
     _process_name = "{}(PID:{})".format(multiprocessing.current_process().name,
                                         multiprocessing.current_process().pid, )
     logger.debug("mpms subprocess %s start. threads:%s", _process_name, threads)
 
     pool = []
-    counter = {"c": 0}
     for i in range(threads):
         th = threading.Thread(target=_worker_container,
-                              args=(task_q, result_q, func, counter, lifecycle),
+                              args=(task_q, result_q, func, None, lifecycle, lifecycle_duration),
                               name="{}#{}".format(_process_name, i + 1)
                               )
         th.daemon = True
@@ -139,7 +160,10 @@ class Meta(dict[str, t.Any]):
         可以用于在主程序中传递一些环境变量给 collector
     """
 
-    mpms: weakref.ProxyType['MPMS']
+    if TYPE_CHECKING:
+        mpms: weakref.ProxyType['MPMS']
+    else:
+        mpms: t.Any
     args: tuple[t.Any, ...]
     kwargs: dict[str, t.Any]
     taskid: str | None
@@ -196,9 +220,15 @@ class MPMS(object):
         processes (int): 进程数, 若不指定则为CPU核心数
         threads (int): 每个进程下多少个线程
         meta (Meta|dict): meta信息, 请看上面 Meta 的说明
+        lifecycle (int|None): 基于任务计数的生命周期，工作线程处理指定数量任务后退出
+        lifecycle_duration (float|None): 基于时间的生命周期（秒），工作线程运行指定时间后退出
+        subproc_check_interval (float): 子进程检查间隔（秒）
 
         total_count (int): 总任务数
         finish_count (int): 已完成的任务数
+
+    Notes:
+        lifecycle 和 lifecycle_duration 同时生效，满足任一条件都会触发工作线程退出
 
     """
 
@@ -212,13 +242,14 @@ class MPMS(object):
     task_queue_maxsize: int
     task_queue_closed: bool
     meta: Meta
-    task_q: multiprocessing.Queue[TaskTuple]
+    task_q: MPQueue
     _process_count: int
-    result_q: multiprocessing.Queue[tuple[t.Any, t.Any]] | None
+    result_q: MPQueue | None
     collector_thread: threading.Thread | None
     worker_processes_pool: dict[str, multiprocessing.Process]
     running_tasks: dict[str, TaskTuple]
     lifecycle: int | None
+    lifecycle_duration: float | None
     subproc_check_interval: float
     _subproc_last_check: float
 
@@ -231,6 +262,7 @@ class MPMS(object):
             task_queue_maxsize: int | None = None,
             meta: Meta | dict[str, t.Any] | None = None,
             lifecycle: int | None = None,
+            lifecycle_duration: float | None = None,
             subproc_check_interval: float = 3,
     ) -> None:
 
@@ -266,6 +298,7 @@ class MPMS(object):
 
         self.running_tasks = {}
         self.lifecycle = lifecycle
+        self.lifecycle_duration = lifecycle_duration
         self.subproc_check_interval = subproc_check_interval
         self._subproc_last_check = time.time()
 
@@ -276,7 +309,7 @@ class MPMS(object):
             target=_slaver,
             args=(self.task_q, self.result_q,
                   self.threads_count, self.worker,
-                  self.lifecycle
+                  self.lifecycle, self.lifecycle_duration
                   ),
             name=name
         )
