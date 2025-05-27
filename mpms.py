@@ -17,6 +17,12 @@ if TYPE_CHECKING:
 else:
     MPQueue = t.Any
 
+try:
+    import setproctitle
+    _setproctitle_available = True
+except ImportError:
+    _setproctitle_available = False
+
 __ALL__ = ["MPMS", "Meta"]
 
 VERSION = (2, 3, 0, 0)
@@ -53,6 +59,12 @@ def _worker_container(
         finargs (tuple): 清理函数的参数
     """
     _th_name = threading.current_thread().name
+    if _setproctitle_available:
+        try:
+            setproctitle.setthreadtitle(_th_name)
+        except Exception as e:
+            # Log and continue if setthreadtitle fails for some reason
+            logger.warning("mpms worker %s failed to set thread title: %s", _th_name, e)
 
     # maybe fix some logging deadlock?
     try:
@@ -135,7 +147,8 @@ def _slaver(
     process_finalizer: FinalizerFunc | None,
     process_finargs: tuple[t.Any, ...],
     thread_finalizer: FinalizerFunc | None,
-    thread_finargs: tuple[t.Any, ...]
+    thread_finargs: tuple[t.Any, ...],
+    process_name_for_titles: str  # Added for naming
 ) -> None:
     """
     接收与多进程任务并分发给子线程
@@ -155,26 +168,36 @@ def _slaver(
         process_finargs (tuple): 进程清理函数的参数
         thread_finalizer (FinalizerFunc|None): 线程清理函数
         thread_finargs (tuple): 线程清理函数的参数
+        process_name_for_titles (str): Base name for process and thread titles.
     """
-    _process_name = "{}(PID:{})".format(multiprocessing.current_process().name,
-                                        multiprocessing.current_process().pid, )
-    logger.debug("mpms subprocess %s start. threads:%s", _process_name, threads)
+    # Set process title using setproctitle if available
+    # multiprocessing.current_process().name is already set by the 'name' argument in Process()
+    # process_name_for_titles is passed to ensure consistency and for logging.
+    if _setproctitle_available:
+        try:
+            setproctitle.setproctitle(process_name_for_titles)
+        except Exception as e:
+            logger.warning("mpms subprocess %s failed to set process title: %s", process_name_for_titles, e)
+
+    logger.debug("mpms subprocess %s (PID:%s) start. threads:%s", 
+                 process_name_for_titles, multiprocessing.current_process().pid, threads)
     
     # 调用进程初始化函数
     if process_initializer is not None:
         try:
             process_initializer(*process_initargs)
-            logger.debug('mpms subprocess %s initialized successfully', _process_name)
+            logger.debug('mpms subprocess %s initialized successfully', process_name_for_titles)
         except Exception as e:
-            logger.error('mpms subprocess %s initialization failed: %s', _process_name, e, exc_info=True)
+            logger.error('mpms subprocess %s initialization failed: %s', process_name_for_titles, e, exc_info=True)
             return  # 初始化失败，退出进程
 
     pool = []
     for i in range(threads):
+        thread_name = f"{process_name_for_titles}#t{i + 1}"
         th = threading.Thread(target=_worker_container,
                               args=(task_q, result_q, func, None, lifecycle, lifecycle_duration, 
                                     thread_initializer, thread_initargs, thread_finalizer, thread_finargs),
-                              name="{}#{}".format(_process_name, i + 1)
+                              name=thread_name
                               )
         th.daemon = True
         pool.append(th)
@@ -188,11 +211,11 @@ def _slaver(
     if process_finalizer is not None:
         try:
             process_finalizer(*process_finargs)
-            logger.debug('mpms subprocess %s finalized successfully', _process_name)
+            logger.debug('mpms subprocess %s finalized successfully', process_name_for_titles)
         except Exception as e:
-            logger.error('mpms subprocess %s finalization failed: %s', _process_name, e, exc_info=True)
+            logger.error('mpms subprocess %s finalization failed: %s', process_name_for_titles, e, exc_info=True)
 
-    logger.debug("mpms subprocess %s exiting", _process_name)
+    logger.debug("mpms subprocess %s exiting", process_name_for_titles)
 
 
 def get_cpu_count() -> int:
@@ -314,6 +337,7 @@ class MPMS(object):
         process_finargs (tuple): 传递给进程清理函数的参数
         thread_finalizer (Callable|None): 线程清理函数，在每个工作线程退出前调用一次
         thread_finargs (tuple): 传递给线程清理函数的参数
+        name (str|None): Optional base name for processes and threads. Defaults to worker function's name.
 
         total_count (int): 总任务数
         finish_count (int): 已完成的任务数
@@ -354,6 +378,7 @@ class MPMS(object):
     process_finargs: tuple[t.Any, ...]
     thread_finalizer: FinalizerFunc | None
     thread_finargs: tuple[t.Any, ...]
+    name: str # Base name for processes/threads
 
     def __init__(
             self,
@@ -374,11 +399,22 @@ class MPMS(object):
             process_finargs: tuple[t.Any, ...] = (),
             thread_finalizer: FinalizerFunc | None = None,
             thread_finargs: tuple[t.Any, ...] = (),
+            name: str | None = None,
     ) -> None:
 
         self.worker = worker
         self.collector = collector
 
+        if name is None:
+            try:
+                # Attempt to create a descriptive name from the worker function
+                self.name = f"{worker.__module__}.{worker.__name__}"
+            except AttributeError:
+                # Fallback if worker is not a standard function (e.g., a lambda or callable class)
+                self.name = "mpms_worker"
+        else:
+            self.name = name
+        
         self.processes_count = processes or get_cpu_count() or 1
         self.threads_count = threads
 
@@ -424,7 +460,8 @@ class MPMS(object):
 
     def _start_one_slaver_process(self) -> None:
         self._process_count += 1
-        name = "mpms-{}".format(self._process_count)
+        # Use self.name for a more descriptive process name
+        process_base_name = f"mpms-{self.name}-p{self._process_count}"
         p = multiprocessing.Process(
             target=_slaver,
             args=(self.task_q, self.result_q,
@@ -433,14 +470,15 @@ class MPMS(object):
                   self.process_initializer, self.process_initargs,
                   self.thread_initializer, self.thread_initargs,
                   self.process_finalizer, self.process_finargs,
-                  self.thread_finalizer, self.thread_finargs
+                  self.thread_finalizer, self.thread_finargs,
+                  process_base_name  # Pass the base name for titles
                   ),
-            name=name
+            name=process_base_name  # Set the process name itself
         )
         p.daemon = True
-        logger.debug('mpms subprocess %s starting', name)
+        logger.debug('mpms subprocess %s starting', process_base_name)
         p.start()
-        self.worker_processes_pool[name] = p
+        self.worker_processes_pool[process_base_name] = p
 
     def _subproc_check(self) -> None:
         if time.time() - self._subproc_last_check < self.subproc_check_interval:
@@ -483,7 +521,8 @@ class MPMS(object):
 
         if self.collector is not None:
             logger.debug("mpms starting collector thread")
-            self.collector_thread = threading.Thread(target=self._collector_container, name='mpms-collector')
+            collector_thread_name = f"mpms-{self.name}-collector"
+            self.collector_thread = threading.Thread(target=self._collector_container, name=collector_thread_name)
             self.collector_thread.daemon = True
             self.collector_thread.start()
         else:
@@ -546,7 +585,14 @@ class MPMS(object):
         接受子进程传入的结果,并把它发送到master_product_handler()中
 
         """
-        logger.debug("mpms collector start")
+        _th_name = threading.current_thread().name
+        if _setproctitle_available:
+            try:
+                setproctitle.setthreadtitle(_th_name)
+            except Exception as e:
+                logger.warning("mpms collector %s failed to set thread title: %s", _th_name, e)
+        
+        logger.debug("mpms collector %s start", _th_name)
 
         while True:
             taskid, result = self.result_q.get()
