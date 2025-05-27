@@ -25,7 +25,7 @@ except ImportError:
 
 __ALL__ = ["MPMS", "Meta", "WorkerGracefulDie"]
 
-VERSION = (2, 4, 0, 0)
+VERSION = (2, 4, 1, 0)
 VERSION_STR = "{}.{}.{}.{}".format(*VERSION)
 
 logger = logging.getLogger(__name__)
@@ -691,39 +691,39 @@ class MPMS(object):
                 if name in self.worker_processes_start_time:
                     del self.worker_processes_start_time[name]
             
-            # 如果有进程被终止，可能需要修复日志锁
-            if processes_to_remove:
-                # maybe fix some logging deadlock?
-                try:
-                    logging._after_at_fork_child_reinit_locks()
-                except:
-                    pass
-                try:
-                    logging._releaseLock()
-                except:
-                    pass
-                
-                # 如果任务队列已关闭，为新进程发送停止信号
-                if self.task_queue_closed:
-                    for _ in range(len(processes_to_remove) * self.threads_count):
-                        self.task_q.put((StopIteration, (), {}, 0.0))
+        # 如果有进程被终止，可能需要修复日志锁
+        if processes_to_remove:
+            # maybe fix some logging deadlock?
+            try:
+                logging._after_at_fork_child_reinit_locks()
+            except:
+                pass
+            try:
+                logging._releaseLock()
+            except:
+                pass
             
-            # 根据需要启动新进程
-            if need_restart and not self.task_queue_closed:
-                # 计算需要的进程数
-                current_process_count = len(self.worker_processes_pool)
-                needed_process_count = min(
-                    self.processes_count,  # 不超过配置的最大进程数
-                    # 根据待处理任务数计算需要的进程数
-                    (len(self.running_tasks) + self.threads_count - 1) // self.threads_count
-                )
-                
-                # 启动新进程
-                for _ in range(needed_process_count - current_process_count):
-                    if len(self.worker_processes_pool) < self.processes_count:
-                        time.sleep(0.1)
-                        self._start_one_slaver_process()
-                        time.sleep(0.1)
+            # 如果任务队列已关闭，为新进程发送停止信号
+            if self.task_queue_closed:
+                for _ in range(len(processes_to_remove) * self.threads_count):
+                    self.task_q.put((StopIteration, (), {}, 0.0))
+            
+        # 根据需要启动新进程
+        if need_restart and not self.task_queue_closed:
+            # 计算需要的进程数
+            current_process_count = len(self.worker_processes_pool)
+            needed_process_count = min(
+                self.processes_count,  # 不超过配置的最大进程数
+                # 根据待处理任务数计算需要的进程数
+                (len(self.running_tasks) + self.threads_count - 1) // self.threads_count
+            )
+            
+            # 启动新进程
+            for _ in range(needed_process_count - current_process_count):
+                if len(self.worker_processes_pool) < self.processes_count:
+                    time.sleep(0.1)
+                    self._start_one_slaver_process()
+                    time.sleep(0.1)
 
     def start(self) -> None:
         if self.worker_processes_pool:
