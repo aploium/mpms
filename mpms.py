@@ -23,12 +23,21 @@ try:
 except ImportError:
     _setproctitle_available = False
 
-__ALL__ = ["MPMS", "Meta"]
+__ALL__ = ["MPMS", "Meta", "WorkerGracefulDie"]
 
 VERSION = (2, 4, 0, 0)
 VERSION_STR = "{}.{}.{}.{}".format(*VERSION)
 
 logger = logging.getLogger(__name__)
+
+
+class WorkerGracefulDie(Exception):
+    """
+    当worker函数抛出此异常时，本worker进程的所有线程都将停止接收新任务，
+    等待一段时间后，此worker进程优雅退出。
+    """
+    pass
+
 
 # Type aliases for clarity
 TaskTuple = tuple[t.Any, tuple[t.Any, ...], dict[str, t.Any], float]  # (taskid, args, kwargs, enqueue_time)
@@ -36,6 +45,58 @@ WorkerFunc = t.Callable[..., t.Any]
 CollectorFunc = t.Callable[['Meta', t.Any], None]
 InitializerFunc = t.Callable[..., None]  # initializer function type
 FinalizerFunc = t.Callable[..., None]  # finalizer function type
+
+
+def _validate_config(
+    processes: int | None = None,
+    threads: int = 2,
+    lifecycle: int | None = None,
+    lifecycle_duration: float | None = None,
+    lifecycle_duration_hard: float | None = None,
+    subproc_check_interval: float = 3,
+    worker_graceful_die_timeout: float = 5,
+    **kwargs
+) -> None:
+    """
+    验证MPMS配置参数的有效性
+    
+    Raises:
+        ValueError: 当配置参数无效时抛出异常
+    """
+    errors = []
+    
+    # 验证进程数
+    if processes is not None and (not isinstance(processes, int) or processes <= 0):
+        errors.append("processes must be a positive integer")
+    
+    # 验证线程数
+    if not isinstance(threads, int) or threads <= 0:
+        errors.append("threads must be a positive integer")
+    
+    # 验证生命周期参数
+    if lifecycle is not None and (not isinstance(lifecycle, int) or lifecycle < 0):
+        errors.append("lifecycle must be a non-negative integer")
+    
+    if lifecycle_duration is not None and (
+        not isinstance(lifecycle_duration, (int, float)) or lifecycle_duration <= 0
+    ):
+        errors.append("lifecycle_duration must be a positive number")
+    
+    if lifecycle_duration_hard is not None and (
+        not isinstance(lifecycle_duration_hard, (int, float)) or lifecycle_duration_hard <= 0
+    ):
+        errors.append("lifecycle_duration_hard must be a positive number")
+    
+    # 验证检查间隔
+    if not isinstance(subproc_check_interval, (int, float)) or subproc_check_interval <= 0:
+        errors.append("subproc_check_interval must be a positive number")
+    
+    # 验证优雅退出超时
+    if not isinstance(worker_graceful_die_timeout, (int, float)) or worker_graceful_die_timeout <= 0:
+        errors.append("worker_graceful_die_timeout must be a positive number")
+    
+    if errors:
+        raise ValueError(f"配置参数验证失败: {', '.join(errors)}")
 
 
 def _worker_container(
@@ -48,7 +109,9 @@ def _worker_container(
     initializer: InitializerFunc | None,
     initargs: tuple[t.Any, ...],
     finalizer: FinalizerFunc | None,
-    finargs: tuple[t.Any, ...]
+    finargs: tuple[t.Any, ...],
+    graceful_die_event: threading.Event | None,
+    worker_graceful_die_exceptions: tuple[type[Exception], ...]
 ) -> None:
     """
     Args:
@@ -57,6 +120,8 @@ def _worker_container(
         initargs (tuple): 初始化函数的参数
         finalizer (FinalizerFunc|None): 可选的清理函数
         finargs (tuple): 清理函数的参数
+        graceful_die_event (threading.Event|None): 优雅退出事件标志
+        worker_graceful_die_exceptions (tuple): 触发优雅退出的异常类型
     """
     _th_name = threading.current_thread().name
     if _setproctitle_available:
@@ -84,7 +149,7 @@ def _worker_container(
             initializer(*initargs)
             logger.debug('mpms worker %s initialized successfully', _th_name)
         except Exception as e:
-            logger.error('mpms worker %s initialization failed: %s', _th_name, e, exc_info=True)
+            logger.error('mpms worker %s initialization failed: %s', _th_name, repr(e), exc_info=True)
             return  # 初始化失败，退出线程
     
     # 记录线程开始时间
@@ -93,12 +158,22 @@ def _worker_container(
     local_task_count = 0
 
     while True:
+        # 检查优雅退出事件
+        if graceful_die_event and graceful_die_event.is_set():
+            logger.debug('mpms worker thread %s exiting due to graceful die event', _th_name)
+            break
+            
         # 检查基于时间的生命周期（在获取任务前检查）
         if lifecycle_duration and time.time() - start_time >= lifecycle_duration:
             logger.debug('mpms worker thread %s reach lifecycle duration %.2fs, exit', _th_name, lifecycle_duration)
             break
 
-        taskid, args, kwargs, enqueue_time = task_q.get()
+        # 使用非阻塞方式获取任务，以便能够定期检查优雅退出事件
+        try:
+            taskid, args, kwargs, enqueue_time = task_q.get(timeout=0.5)
+        except queue.Empty:
+            continue
+            
         # logger.debug("mpms worker %s got taskid:%s", _th_name, taskid)
 
         if taskid is StopIteration:
@@ -107,8 +182,17 @@ def _worker_container(
 
         try:
             result = func(*args, **kwargs)
+        except worker_graceful_die_exceptions as e:
+            # 触发优雅退出
+            logger.warning("mpms worker %s caught graceful die exception %s in taskid %s, triggering graceful die", 
+                         _th_name, type(e).__name__, taskid)
+            if graceful_die_event:
+                graceful_die_event.set()
+            # 仍然需要报告这个异常
+            if result_q is not None:
+                result_q.put_nowait((taskid, e))
         except Exception as e:
-            logger.error("Unhandled error %s in worker thread, taskid: %s", e, taskid, exc_info=True)
+            logger.error("Unhandled error %s in worker thread, taskid: %s", repr(e), taskid, exc_info=True)
             if result_q is not None:
                 result_q.put_nowait((taskid, e))
         else:
@@ -148,7 +232,9 @@ def _slaver(
     process_finargs: tuple[t.Any, ...],
     thread_finalizer: FinalizerFunc | None,
     thread_finargs: tuple[t.Any, ...],
-    process_name_for_titles: str  # Added for naming
+    process_name_for_titles: str,  # Added for naming
+    worker_graceful_die_timeout: float,
+    worker_graceful_die_exceptions: tuple[type[Exception], ...]
 ) -> None:
     """
     接收与多进程任务并分发给子线程
@@ -169,6 +255,8 @@ def _slaver(
         thread_finalizer (FinalizerFunc|None): 线程清理函数
         thread_finargs (tuple): 线程清理函数的参数
         process_name_for_titles (str): Base name for process and thread titles.
+        worker_graceful_die_timeout (float): 优雅退出超时时间（秒）
+        worker_graceful_die_exceptions (tuple): 触发优雅退出的异常类型
     """
     # Set process title using setproctitle if available
     # multiprocessing.current_process().name is already set by the 'name' argument in Process()
@@ -191,12 +279,16 @@ def _slaver(
             logger.error('mpms subprocess %s initialization failed: %s', process_name_for_titles, e, exc_info=True)
             return  # 初始化失败，退出进程
 
+    # 创建优雅退出事件
+    graceful_die_event = threading.Event()
+    
     pool = []
     for i in range(threads):
         thread_name = f"{process_name_for_titles}#t{i + 1}"
         th = threading.Thread(target=_worker_container,
                               args=(task_q, result_q, func, None, lifecycle, lifecycle_duration, 
-                                    thread_initializer, thread_initargs, thread_finalizer, thread_finargs),
+                                    thread_initializer, thread_initargs, thread_finalizer, thread_finargs,
+                                    graceful_die_event, worker_graceful_die_exceptions),
                               name=thread_name
                               )
         th.daemon = True
@@ -204,8 +296,31 @@ def _slaver(
     for th in pool:
         th.start()
 
-    for th in pool:
-        th.join()
+    # 监控优雅退出事件
+    graceful_die_triggered_time = None
+    while True:
+        # 检查是否所有线程都已退出
+        all_threads_dead = not any(th.is_alive() for th in pool)
+        
+        # 如果优雅退出事件被触发
+        if graceful_die_event.is_set():
+            if graceful_die_triggered_time is None:
+                graceful_die_triggered_time = time.time()
+                logger.warning('mpms subprocess %s graceful die triggered, waiting %.2fs before exit', 
+                             process_name_for_titles, worker_graceful_die_timeout)
+            
+            # 检查优雅退出超时
+            if time.time() - graceful_die_triggered_time >= worker_graceful_die_timeout:
+                logger.warning('mpms subprocess %s graceful die timeout reached, exiting', process_name_for_titles)
+                # 强制退出进程
+                os._exit(1)
+        
+        # 如果没有触发优雅退出且所有线程都退出了，可以正常退出
+        if all_threads_dead and graceful_die_triggered_time is None:
+            break
+        
+        # 短暂休眠以避免忙等待
+        time.sleep(0.1)
 
     # 调用进程清理函数
     if process_finalizer is not None:
@@ -310,7 +425,9 @@ class MPMS(object):
                 thread_initargs=(multiprocessing.current_process().name,),  # optional
                 process_finalizer=process_cleanup,  # optional
                 thread_finalizer=thread_cleanup,  # optional
-                thread_finargs=(multiprocessing.current_process().name,)  # optional
+                thread_finargs=(multiprocessing.current_process().name,),  # optional
+                worker_graceful_die_timeout=10,  # optional
+                worker_graceful_die_exceptions=(WorkerGracefulDie, MemoryError),  # optional
                 )
             m.start()
             for i in range(100):
@@ -339,6 +456,8 @@ class MPMS(object):
         thread_finalizer (Callable|None): 线程清理函数，在每个工作线程退出前调用一次
         thread_finargs (tuple): 传递给线程清理函数的参数
         name (str|None): Optional base name for processes and threads. Defaults to worker function's name.
+        worker_graceful_die_timeout (float): 优雅退出超时时间（秒），默认为5秒
+        worker_graceful_die_exceptions (tuple[type[Exception], ...]): 触发优雅退出的异常类型，默认为 (WorkerGracefulDie,)
 
         total_count (int): 总任务数
         finish_count (int): 已完成的任务数
@@ -349,6 +468,10 @@ class MPMS(object):
             - 当进程运行时间超过此限制时，主进程会强制终止该进程
             - 当任务运行时间超过此限制时，该任务会被标记为超时错误
             - 这是为了防止任务hang死导致worker无法接收新任务的情况
+        worker_graceful_die_exceptions 定义了触发优雅退出的异常类型：
+            - 当worker函数抛出这些异常时，进程会停止接收新任务
+            - 等待 worker_graceful_die_timeout 秒后，进程会优雅退出
+            - 这允许worker主动标记自己为不健康状态
         如果初始化函数抛出异常，对应的进程或线程将退出，不会处理任何任务
         清理函数在进程或线程正常退出前调用（包括因生命周期限制而退出的情况）
         如果清理函数抛出异常，将记录错误日志但不影响退出流程
@@ -386,6 +509,8 @@ class MPMS(object):
     thread_finalizer: FinalizerFunc | None
     thread_finargs: tuple[t.Any, ...]
     name: str # Base name for processes/threads
+    worker_graceful_die_timeout: float
+    worker_graceful_die_exceptions: tuple[type[Exception], ...]
 
     def __init__(
             self,
@@ -408,7 +533,20 @@ class MPMS(object):
             thread_finalizer: FinalizerFunc | None = None,
             thread_finargs: tuple[t.Any, ...] = (),
             name: str | None = None,
+            worker_graceful_die_timeout: float = 5,
+            worker_graceful_die_exceptions: tuple[type[Exception], ...] = (WorkerGracefulDie,),
     ) -> None:
+
+        # 验证配置参数
+        _validate_config(
+            processes=processes,
+            threads=threads,
+            lifecycle=lifecycle,
+            lifecycle_duration=lifecycle_duration,
+            lifecycle_duration_hard=lifecycle_duration_hard,
+            subproc_check_interval=subproc_check_interval,
+            worker_graceful_die_timeout=worker_graceful_die_timeout
+        )
 
         self.worker = worker
         self.collector = collector
@@ -467,116 +605,125 @@ class MPMS(object):
         self.process_finargs = process_finargs
         self.thread_finalizer = thread_finalizer
         self.thread_finargs = thread_finargs
+        self.worker_graceful_die_timeout = worker_graceful_die_timeout
+        self.worker_graceful_die_exceptions = worker_graceful_die_exceptions
+
+        self._taskid_lock = threading.Lock()
+        self._process_management_lock = threading.Lock()
+        self._atomic_counter = 0
 
     def _start_one_slaver_process(self) -> None:
-        self._process_count += 1
-        # Use self.name for a more descriptive process name
-        process_base_name = f"mpms-{self.name}-p{self._process_count}"
-        p = multiprocessing.Process(
-            target=_slaver,
-            args=(self.task_q, self.result_q,
-                  self.threads_count, self.worker,
-                  self.lifecycle, self.lifecycle_duration,
-                  self.process_initializer, self.process_initargs,
-                  self.thread_initializer, self.thread_initargs,
-                  self.process_finalizer, self.process_finargs,
-                  self.thread_finalizer, self.thread_finargs,
-                  process_base_name  # Pass the base name for titles
-                  ),
-            name=process_base_name  # Set the process name itself
-        )
-        p.daemon = True
-        logger.debug('mpms subprocess %s starting', process_base_name)
-        p.start()
-        self.worker_processes_pool[process_base_name] = p
-        self.worker_processes_start_time[process_base_name] = time.time()
+        with self._process_management_lock:
+            self._process_count += 1
+            # Use self.name for a more descriptive process name
+            process_base_name = f"mpms-{self.name}-p{self._process_count}"
+            p = multiprocessing.Process(
+                target=_slaver,
+                args=(self.task_q, self.result_q,
+                      self.threads_count, self.worker,
+                      self.lifecycle, self.lifecycle_duration,
+                      self.process_initializer, self.process_initargs,
+                      self.thread_initializer, self.thread_initargs,
+                      self.process_finalizer, self.process_finargs,
+                      self.thread_finalizer, self.thread_finargs,
+                      process_base_name,  # Pass the base name for titles
+                      self.worker_graceful_die_timeout,
+                      self.worker_graceful_die_exceptions),
+                name=process_base_name  # Set the process name itself
+            )
+            p.daemon = True
+            logger.debug('mpms subprocess %s starting', process_base_name)
+            p.start()
+            self.worker_processes_pool[process_base_name] = p
+            self.worker_processes_start_time[process_base_name] = time.time()
 
     def _subproc_check(self) -> None:
-        if time.time() - self._subproc_last_check < self.subproc_check_interval:
-            return
-        self._subproc_last_check = time.time()
-        
-        current_time = time.time()
-        
-        # 检查任务超时
-        if self.lifecycle_duration_hard and self.collector:
-            for taskid, task_tuple in list(self.running_tasks.items()):
-                _, args, kwargs, enqueue_time = task_tuple
-                if current_time - enqueue_time > self.lifecycle_duration_hard:
-                    logger.warning('mpms task %s timeout after %.2fs, marking as error', 
-                                 taskid, current_time - enqueue_time)
-                    # 将超时任务标记为错误
-                    timeout_error = TimeoutError(f'Task {taskid} timeout after {current_time - enqueue_time:.2f}s')
-                    if self.result_q is not None:
-                        self.result_q.put_nowait((taskid, timeout_error))
-                    # 不从 running_tasks 中删除，让 collector 处理
-        
-        # 检查进程状态和超时，收集需要处理的进程
-        processes_to_remove = []
-        need_restart = False
-        
-        for name, p in tuple(self.worker_processes_pool.items()):  # type:str, multiprocessing.Process
-            process_start_time = self.worker_processes_start_time.get(name, 0)
-            process_age = current_time - process_start_time if process_start_time else 0
+        with self._process_management_lock:
+            if time.time() - self._subproc_last_check < self.subproc_check_interval:
+                return
+            self._subproc_last_check = time.time()
             
-            # 检查进程是否需要因为硬性超时而被杀死
-            if self.lifecycle_duration_hard and process_age > self.lifecycle_duration_hard:
-                logger.warning('mpms subprocess %s exceeded hard timeout %.2fs, terminating', 
-                             name, self.lifecycle_duration_hard)
-                p.terminate()
-                p.join(timeout=1)  # 等待1秒
-                if p.is_alive():
-                    p.kill()  # 如果还活着就强制杀死
-                p.close()
-                processes_to_remove.append(name)
-                need_restart = True
-            elif not p.is_alive():
-                # 进程已死亡的正常处理
-                logger.info('mpms subprocess %s dead, restarting', name)
-                p.terminate()
-                p.close()
-                processes_to_remove.append(name)
-                need_restart = True
-        
-        # 清理已终止的进程
-        for name in processes_to_remove:
-            del self.worker_processes_pool[name]
-            if name in self.worker_processes_start_time:
-                del self.worker_processes_start_time[name]
-        
-        # 如果有进程被终止，可能需要修复日志锁
-        if processes_to_remove:
-            # maybe fix some logging deadlock?
-            try:
-                logging._after_at_fork_child_reinit_locks()
-            except:
-                pass
-            try:
-                logging._releaseLock()
-            except:
-                pass
+            current_time = time.time()
             
-            # 如果任务队列已关闭，为新进程发送停止信号
-            if self.task_queue_closed:
-                for _ in range(len(processes_to_remove) * self.threads_count):
-                    self.task_q.put((StopIteration, (), {}, 0.0))
-        
-        # 根据需要启动新进程
-        if need_restart and not self.task_queue_closed:
-            # 计算需要的进程数
-            current_process_count = len(self.worker_processes_pool)
-            needed_process_count = min(
-                self.processes_count,  # 不超过配置的最大进程数
-                # 根据待处理任务数计算需要的进程数
-                (len(self.running_tasks) + self.threads_count - 1) // self.threads_count
-            )
+            # 检查任务超时
+            if self.lifecycle_duration_hard and self.collector:
+                for taskid, task_tuple in list(self.running_tasks.items()):
+                    _, args, kwargs, enqueue_time = task_tuple
+                    if current_time - enqueue_time > self.lifecycle_duration_hard:
+                        logger.warning('mpms task %s timeout after %.2fs, marking as error', 
+                                     taskid, current_time - enqueue_time)
+                        # 将超时任务标记为错误
+                        timeout_error = TimeoutError(f'Task {taskid} timeout after {current_time - enqueue_time:.2f}s')
+                        if self.result_q is not None:
+                            self.result_q.put_nowait((taskid, timeout_error))
+                        # 不从 running_tasks 中删除，让 collector 处理
             
-            # 启动新进程
-            for _ in range(needed_process_count - current_process_count):
-                if len(self.worker_processes_pool) < self.processes_count:
-                    time.sleep(0.1)
-                    self._start_one_slaver_process()
-                    time.sleep(0.1)
+            # 检查进程状态和超时，收集需要处理的进程
+            processes_to_remove = []
+            need_restart = False
+            
+            for name, p in tuple(self.worker_processes_pool.items()):  # type:str, multiprocessing.Process
+                process_start_time = self.worker_processes_start_time.get(name, 0)
+                process_age = current_time - process_start_time if process_start_time else 0
+                
+                # 检查进程是否需要因为硬性超时而被杀死
+                if self.lifecycle_duration_hard and process_age > self.lifecycle_duration_hard:
+                    logger.warning('mpms subprocess %s exceeded hard timeout %.2fs, terminating', 
+                                 name, self.lifecycle_duration_hard)
+                    p.terminate()
+                    p.join(timeout=1)  # 等待1秒
+                    if p.is_alive():
+                        p.kill()  # 如果还活着就强制杀死
+                    p.close()
+                    processes_to_remove.append(name)
+                    need_restart = True
+                elif not p.is_alive():
+                    # 进程已死亡的正常处理
+                    logger.info('mpms subprocess %s dead, restarting', name)
+                    p.terminate()
+                    p.close()
+                    processes_to_remove.append(name)
+                    need_restart = True
+            
+            # 清理已终止的进程
+            for name in processes_to_remove:
+                del self.worker_processes_pool[name]
+                if name in self.worker_processes_start_time:
+                    del self.worker_processes_start_time[name]
+            
+            # 如果有进程被终止，可能需要修复日志锁
+            if processes_to_remove:
+                # maybe fix some logging deadlock?
+                try:
+                    logging._after_at_fork_child_reinit_locks()
+                except:
+                    pass
+                try:
+                    logging._releaseLock()
+                except:
+                    pass
+                
+                # 如果任务队列已关闭，为新进程发送停止信号
+                if self.task_queue_closed:
+                    for _ in range(len(processes_to_remove) * self.threads_count):
+                        self.task_q.put((StopIteration, (), {}, 0.0))
+            
+            # 根据需要启动新进程
+            if need_restart and not self.task_queue_closed:
+                # 计算需要的进程数
+                current_process_count = len(self.worker_processes_pool)
+                needed_process_count = min(
+                    self.processes_count,  # 不超过配置的最大进程数
+                    # 根据待处理任务数计算需要的进程数
+                    (len(self.running_tasks) + self.threads_count - 1) // self.threads_count
+                )
+                
+                # 启动新进程
+                for _ in range(needed_process_count - current_process_count):
+                    if len(self.worker_processes_pool) < self.processes_count:
+                        time.sleep(0.1)
+                        self._start_one_slaver_process()
+                        time.sleep(0.1)
 
     def start(self) -> None:
         if self.worker_processes_pool:
@@ -620,7 +767,9 @@ class MPMS(object):
                 self._subproc_check()
             else:
                 break
-        self.total_count += 1
+        
+        with self._taskid_lock:
+            self.total_count += 1
 
     def join(self, close: bool = True) -> None:
         """
@@ -657,7 +806,14 @@ class MPMS(object):
         logger.debug("mpms join completed")
 
     def _gen_taskid(self) -> str:
-        return "mpms{}".format(self.total_count)
+        """
+        线程安全的taskid生成
+        """
+        with self._taskid_lock:
+            self._atomic_counter += 1
+            # 使用时间戳和计数器确保唯一性
+            timestamp = int(time.time() * 1000000)  # 微秒时间戳
+            return f"mpms-{timestamp}-{self._atomic_counter}"
 
     def _collector_container(self) -> None:
         """
