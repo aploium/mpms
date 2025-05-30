@@ -64,13 +64,61 @@ m = MPMS(worker, lifecycle_duration=3600)  # Each thread exits after 1 hour
 m = MPMS(worker, lifecycle=100, lifecycle_duration=3600)  # Exit on 100 tasks OR 1 hour
 ```
 
+#### Iterator-based Result Collection (v2.5.0)
+
+MPMS now supports an alternative way to collect results using the `iter_results()` method. This provides a more Pythonic way to process results without defining a separate collector function.
+
+```python
+from mpms import MPMS
+
+def worker(i):
+    # 你的处理逻辑
+    return i * 2
+
+# 使用 iter_results 获取结果
+m = MPMS(worker, processes=2, threads=4)
+m.start()
+
+# 提交任务
+for i in range(10):
+    m.put(i)
+
+# 关闭任务队列（必须在使用 iter_results 之前）
+m.close()
+
+# 迭代获取结果
+for meta, result in m.iter_results():
+    if isinstance(result, Exception):
+        print(f"任务 {meta.taskid} 失败: {result}")
+    else:
+        print(f"任务 {meta.taskid} 结果: {result}")
+
+m.join(close=False)  # 注意：已经调用过 close()
+```
+
+**注意事项：**
+- `iter_results()` 不能与 `collector` 参数同时使用
+- 必须在调用 `close()` 之后才能使用 `iter_results()`
+- 迭代器会自动结束当所有任务完成时
+- 如果 worker 函数抛出异常，`result` 将是该异常对象
+
+**带超时的迭代：**
+```python
+# 设置单个结果的获取超时（秒）
+for meta, result in m.iter_results(timeout=1.0):
+    # 处理结果
+    pass
+```
+
 ### Examples
 
 See the `examples/` directory for complete examples:
 - `examples/demo.py` - Basic usage demonstration
 - `examples/demo_lifecycle.py` - Lifecycle management features
+- `demo_iter_results.py` - Iterator-based result collection examples
 
 ### Tests
 
 See the `tests/` directory for test scripts:
 - `tests/test_lifecycle.py` - Tests for lifecycle management features
+- `test_iter_results.py` - Tests for iterator-based result collection

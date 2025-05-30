@@ -25,7 +25,7 @@ except ImportError:
 
 __ALL__ = ["MPMS", "Meta", "WorkerGracefulDie"]
 
-VERSION = (2, 4, 1, 0)
+VERSION = (2, 5, 0, 0)
 VERSION_STR = "{}.{}.{}.{}".format(*VERSION)
 
 logger = logging.getLogger(__name__)
@@ -433,6 +433,29 @@ class MPMS(object):
             for i in range(100):
                 m.put(i, 2333)
             m.join()
+        
+        # 使用iter_results的例子
+        def main_with_iter():
+            m = MPMS(worker, processes=2, threads=2)
+            m.start()
+            
+            # 提交任务
+            for i in range(100):
+                m.put(i, t=i*2)
+            
+            # 关闭任务队列
+            m.close()
+            
+            # 迭代获取结果
+            for meta, result in m.iter_results():
+                if isinstance(result, Exception):
+                    print(f"任务 {meta.taskid} 失败: {result}")
+                else:
+                    foo, bar = result
+                    print(f"任务 {meta.taskid} 成功: foo={foo}, bar={bar}")
+            
+            # 等待所有进程结束
+            m.join(close=False)  # 已经close过了
 
         if __name__ == '__main__':
             main()
@@ -490,7 +513,7 @@ class MPMS(object):
     meta: Meta
     task_q: MPQueue
     _process_count: int
-    result_q: MPQueue | None
+    result_q: MPQueue
     collector_thread: threading.Thread | None
     worker_processes_pool: dict[str, multiprocessing.Process]
     worker_processes_start_time: dict[str, float]  # 记录每个进程的启动时间
@@ -511,6 +534,7 @@ class MPMS(object):
     name: str # Base name for processes/threads
     worker_graceful_die_timeout: float
     worker_graceful_die_exceptions: tuple[type[Exception], ...]
+    _use_iter_results: bool
 
     def __init__(
             self,
@@ -579,10 +603,8 @@ class MPMS(object):
         self.task_q = multiprocessing.Queue(maxsize=self.task_queue_maxsize)
         self._process_count = 0
 
-        if self.collector:
-            self.result_q = multiprocessing.Queue()
-        else:
-            self.result_q = None
+        # 始终创建result_q，以支持collector和iter_results两种模式
+        self.result_q = multiprocessing.Queue()
 
         self.collector_thread = None
 
@@ -611,6 +633,7 @@ class MPMS(object):
         self._taskid_lock = threading.Lock()
         self._process_management_lock = threading.Lock()
         self._atomic_counter = 0
+        self._use_iter_results = False  # 标识是否使用迭代器模式获取结果
 
     def _start_one_slaver_process(self) -> None:
         with self._process_management_lock:
@@ -646,7 +669,7 @@ class MPMS(object):
             current_time = time.time()
             
             # 检查任务超时
-            if self.lifecycle_duration_hard and self.collector:
+            if self.lifecycle_duration_hard and (self.collector or self._use_iter_results):
                 for taskid, task_tuple in list(self.running_tasks.items()):
                     _, args, kwargs, enqueue_time = task_tuple
                     if current_time - enqueue_time > self.lifecycle_duration_hard:
@@ -656,7 +679,7 @@ class MPMS(object):
                         timeout_error = TimeoutError(f'Task {taskid} timeout after {current_time - enqueue_time:.2f}s')
                         if self.result_q is not None:
                             self.result_q.put_nowait((taskid, timeout_error))
-                        # 不从 running_tasks 中删除，让 collector 处理
+                        # 不从 running_tasks 中删除，让 collector 或 iter_results 处理
             
             # 检查进程状态和超时，收集需要处理的进程
             processes_to_remove = []
@@ -755,7 +778,10 @@ class MPMS(object):
 
         taskid = self._gen_taskid()
         task_tuple = (taskid, args, kwargs, time.time())
-        if self.collector:
+        
+        # 只有在需要时才记录running_tasks（有collector或可能使用iter_results）
+        if self.collector or not self.task_queue_closed:
+            # 如果有collector，或者任务队列还没关闭（可能会使用iter_results），则记录
             self.running_tasks[taskid] = task_tuple
 
         self._subproc_check()
@@ -858,3 +884,103 @@ class MPMS(object):
         for i in range(self._process_count * self.threads_count):
             self.task_q.put((StopIteration, (), {}, 0.0))
         self.task_queue_closed = True
+
+    def iter_results(self, timeout: float | None = None) -> t.Iterator[tuple[Meta, t.Any]]:
+        """
+        迭代器方式获取任务执行结果
+        
+        Args:
+            timeout: 获取单个结果的超时时间（秒）。如果为None，将一直等待。
+            
+        Yields:
+            tuple[Meta, Any]: (meta信息, 执行结果) 的元组
+            
+        Raises:
+            RuntimeError: 如果同时使用了collector或在start之前调用
+            
+        Examples:
+            >>> m = MPMS(worker_func)
+            >>> m.start()
+            >>> for i in range(10):
+            ...     m.put(i)
+            >>> # 可以在close()之前或之后调用iter_results
+            >>> for meta, result in m.iter_results():
+            ...     if isinstance(result, Exception):
+            ...         print(f"Task {meta.taskid} failed: {result}")
+            ...     else:
+            ...         print(f"Task {meta.taskid} result: {result}")
+            >>> m.close()  # 可选，也可以在iter_results之前调用
+        
+        Notes:
+            - 不能与collector同时使用
+            - 可以在close()之前或之后调用
+            - 当所有任务完成后，迭代器自动结束
+            - 如果worker抛出异常，result将是该异常对象
+            - 如果在任务队列未关闭时调用，迭代器会等待新的结果
+        """
+        # 检查是否可以使用iter_results
+        if self.collector is not None:
+            raise RuntimeError("不能同时使用collector和iter_results，请选择其中一种方式处理结果")
+        
+        if not self.worker_processes_pool:
+            raise RuntimeError("必须先调用start()方法启动工作进程")
+        
+        # 设置使用迭代器模式
+        self._use_iter_results = True
+        
+        # 创建一个新的Meta实例用于返回结果
+        result_meta = Meta(self)
+        if self.meta:
+            # 复制用户自定义的meta信息
+            for key, value in self.meta.items():
+                if key not in ('args', 'kwargs', 'taskid'):
+                    result_meta[key] = value
+        
+        # 迭代获取结果
+        while True:
+            # 检查是否应该继续等待结果
+            # 如果任务队列已关闭且没有运行中的任务，且已完成所有任务，则退出
+            if (self.task_queue_closed and 
+                not self.running_tasks and 
+                self.finish_count >= self.total_count):
+                break
+                
+            try:
+                if timeout is None:
+                    taskid, result = self.result_q.get()
+                else:
+                    taskid, result = self.result_q.get(timeout=timeout)
+                    
+                if taskid is StopIteration:
+                    # 忽略停止信号，继续处理剩余结果
+                    continue
+                    
+                # 从running_tasks获取任务信息
+                if taskid in self.running_tasks:
+                    _, args, kwargs, _ = self.running_tasks.pop(taskid)
+                    result_meta.taskid = taskid
+                    result_meta.args = args
+                    result_meta.kwargs = kwargs
+                    self.finish_count += 1
+                    
+                    yield result_meta, result
+                    
+                    # 清理meta信息，为下一次迭代准备
+                    result_meta.taskid = None
+                    result_meta.args = ()
+                    result_meta.kwargs = {}
+                else:
+                    # 任务已经被处理（可能是超时任务）
+                    logger.warning("收到未知任务ID的结果: %s", taskid)
+                    
+            except queue.Empty:
+                # 超时了，检查进程状态
+                self._subproc_check()
+                # 如果任务队列已关闭且没有运行中的任务，且已完成所有任务，则退出
+                if (self.task_queue_closed and 
+                    not self.running_tasks and 
+                    self.finish_count >= self.total_count):
+                    break
+                    
+        logger.debug("mpms iter_results completed, total: %d, finished: %d", 
+                    self.total_count, self.finish_count)

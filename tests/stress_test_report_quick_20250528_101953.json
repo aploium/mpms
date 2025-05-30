@@ -1,0 +1,29 @@
+{
+  "test_level": "quick",
+  "total_duration": 0.7394251823425293,
+  "total_tests": 2,
+  "successful_tests": 0,
+  "failed_tests": 2,
+  "success_rate": 0.0,
+  "test_results": {
+    "test_stress_comprehensive.py::TestMPMSStress::test_edge_cases": {
+      "test_file": "test_stress_comprehensive.py::TestMPMSStress::test_edge_cases",
+      "duration": 0.3720204830169678,
+      "return_code": 4,
+      "stdout": "",
+      "stderr": "ERROR: usage: __main__.py [options] [file_or_dir] [file_or_dir] [...]\n__main__.py: error: unrecognized arguments: --cov=mpms --cov-report=term-missing:skip-covered --cov-report=html\n  inifile: /mnt/d/python/mpms/tests/pytest.ini\n  rootdir: /mnt/d/python/mpms/tests\n\n",
+      "success": false,
+      "timeout_occurred": false
+    },
+    "test_performance_benchmark.py::TestMPMSPerformance::test_baseline_performance": {
+      "test_file": "test_performance_benchmark.py::TestMPMSPerformance::test_baseline_performance",
+      "duration": 0.3670625686645508,
+      "return_code": 4,
+      "stdout": "",
+      "stderr": "ERROR: usage: __main__.py [options] [file_or_dir] [file_or_dir] [...]\n__main__.py: error: unrecognized arguments: --cov=mpms --cov-report=term-missing:skip-covered --cov-report=html\n  inifile: /mnt/d/python/mpms/tests/pytest.ini\n  rootdir: /mnt/d/python/mpms/tests\n\n",
+      "success": false,
+      "timeout_occurred": false
+    }
+  },
+  "summary": "压力测试摘要 - QUICK 级别\n==================================================\n总测试数: 2\n成功: 0\n失败: 2\n成功率: 0.0%\n总耗时: 0.7 秒\n\n详细结果:\n  ❌ test_stress_comprehensive.py::TestMPMSStress::test_edge_cases (0.4s)\n      错误: ERROR: usage: __main__.py [options] [file_or_dir] [file_or_dir] [...]\n__main__.py: error: unrecogniz...\n  ❌ test_performance_benchmark.py::TestMPMSPerformance::test_baseline_performance (0.4s)\n      错误: ERROR: usage: __main__.py [options] [file_or_dir] [file_or_dir] [...]\n__main__.py: error: unrecogniz..."
+}

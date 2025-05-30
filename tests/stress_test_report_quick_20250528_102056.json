@@ -1,0 +1,29 @@
+{
+  "test_level": "quick",
+  "total_duration": 3.7977747917175293,
+  "total_tests": 2,
+  "successful_tests": 2,
+  "failed_tests": 0,
+  "success_rate": 1.0,
+  "test_results": {
+    "test_stress_comprehensive.py::TestMPMSStress::test_edge_cases": {
+      "test_file": "test_stress_comprehensive.py::TestMPMSStress::test_edge_cases",
+      "duration": 2.494722366333008,
+      "return_code": 0,
+      "stdout": "============================= test session starts ==============================\nplatform linux -- Python 3.13.3, pytest-8.3.5, pluggy-1.5.0 -- /opt/miniforge313/bin/python\ncachedir: .pytest_cache\nrootdir: /mnt/d/python/mpms/tests\nconfigfile: pytest.ini\nplugins: time-machine-2.16.0, anyio-4.9.0\ncollecting ... collected 1 item\n\ntest_stress_comprehensive.py::TestMPMSStress::test_edge_cases PASSED\n\n=============================== warnings summary ===============================\n../../../../../opt/miniforge313/lib/python3.13/site-packages/_pytest/config/__init__.py:1441\n  /opt/miniforge313/lib/python3.13/site-packages/_pytest/config/__init__.py:1441: PytestConfigWarning: Unknown config option: timeout\n  \n    self._warn_or_fail_if_strict(f\"Unknown config option: {key}\\n\")\n\ntest_stress_comprehensive.py::TestMPMSStress::test_edge_cases\ntest_stress_comprehensive.py::TestMPMSStress::test_edge_cases\ntest_stress_comprehensive.py::TestMPMSStress::test_edge_cases\ntest_stress_comprehensive.py::TestMPMSStress::test_edge_cases\n  /opt/miniforge313/lib/python3.13/multiprocessing/popen_fork.py:67: DeprecationWarning: This process (pid=9063) is multi-threaded, use of fork() may lead to deadlocks in the child.\n    self.pid = os.fork()\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n======================== 1 passed, 5 warnings in 1.80s =========================\n",
+      "stderr": "",
+      "success": true,
+      "timeout_occurred": false
+    },
+    "test_performance_benchmark.py::TestMPMSPerformance::test_baseline_performance": {
+      "test_file": "test_performance_benchmark.py::TestMPMSPerformance::test_baseline_performance",
+      "duration": 1.3027312755584717,
+      "return_code": 0,
+      "stdout": "============================= test session starts ==============================\nplatform linux -- Python 3.13.3, pytest-8.3.5, pluggy-1.5.0 -- /opt/miniforge313/bin/python\ncachedir: .pytest_cache\nrootdir: /mnt/d/python/mpms/tests\nconfigfile: pytest.ini\nplugins: time-machine-2.16.0, anyio-4.9.0\ncollecting ... collected 1 item\n\ntest_performance_benchmark.py::TestMPMSPerformance::test_baseline_performance PASSED\n\n=============================== warnings summary ===============================\n../../../../../opt/miniforge313/lib/python3.13/site-packages/_pytest/config/__init__.py:1441\n  /opt/miniforge313/lib/python3.13/site-packages/_pytest/config/__init__.py:1441: PytestConfigWarning: Unknown config option: timeout\n  \n    self._warn_or_fail_if_strict(f\"Unknown config option: {key}\\n\")\n\ntest_performance_benchmark.py::TestMPMSPerformance::test_baseline_performance\ntest_performance_benchmark.py::TestMPMSPerformance::test_baseline_performance\n  /opt/miniforge313/lib/python3.13/multiprocessing/popen_fork.py:67: DeprecationWarning: This process (pid=9104) is multi-threaded, use of fork() may lead to deadlocks in the child.\n    self.pid = os.fork()\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n======================== 1 passed, 3 warnings in 0.90s =========================\n",
+      "stderr": "",
+      "success": true,
+      "timeout_occurred": false
+    }
+  },
+  "summary": "压力测试摘要 - QUICK 级别\n==================================================\n总测试数: 2\n成功: 2\n失败: 0\n成功率: 100.0%\n总耗时: 3.8 秒\n\n详细结果:\n  ✅ test_stress_comprehensive.py::TestMPMSStress::test_edge_cases (2.5s)\n  ✅ test_performance_benchmark.py::TestMPMSPerformance::test_baseline_performance (1.3s)"
+}
