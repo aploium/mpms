@@ -661,60 +661,109 @@ class MPMS(object):
             self.worker_processes_start_time[process_base_name] = time.time()
 
     def _subproc_check(self) -> None:
+        # 先快速检查是否需要执行
         with self._process_management_lock:
             if time.time() - self._subproc_last_check < self.subproc_check_interval:
                 return
             self._subproc_last_check = time.time()
             
-            current_time = time.time()
+            # 快速收集进程信息的快照
+            processes_snapshot = list(self.worker_processes_pool.items())
+            task_queue_closed = self.task_queue_closed
             
-            # 检查任务超时
-            if self.lifecycle_duration_hard and (self.collector or self._use_iter_results):
-                for taskid, task_tuple in list(self.running_tasks.items()):
-                    _, args, kwargs, enqueue_time = task_tuple
-                    if current_time - enqueue_time > self.lifecycle_duration_hard:
-                        logger.warning('mpms task %s timeout after %.2fs, marking as error', 
-                                     taskid, current_time - enqueue_time)
-                        # 将超时任务标记为错误
-                        timeout_error = TimeoutError(f'Task {taskid} timeout after {current_time - enqueue_time:.2f}s')
-                        if self.result_q is not None:
-                            self.result_q.put_nowait((taskid, timeout_error))
-                        # 不从 running_tasks 中删除，让 collector 或 iter_results 处理
+        # 在锁外进行诊断日志
+        current_time = time.time()
+        alive_count = sum(1 for _, p in processes_snapshot if p.is_alive())
+        total_count = len(processes_snapshot)
+        if alive_count != total_count:
+            logger.warning('mpms process health check: %d/%d processes alive, running_tasks=%d', 
+                         alive_count, total_count, len(self.running_tasks))
+        
+        # 在锁外检查任务超时
+        if self.lifecycle_duration_hard and (self.collector or self._use_iter_results):
+            timeout_tasks = []
+            for taskid, task_tuple in list(self.running_tasks.items()):
+                _, args, kwargs, enqueue_time = task_tuple
+                if current_time - enqueue_time > self.lifecycle_duration_hard:
+                    logger.warning('mpms task %s timeout after %.2fs, marking as error', 
+                                 taskid, current_time - enqueue_time)
+                    # 将超时任务标记为错误
+                    timeout_error = TimeoutError(f'Task {taskid} timeout after {current_time - enqueue_time:.2f}s')
+                    timeout_tasks.append((taskid, timeout_error))
             
-            # 检查进程状态和超时，收集需要处理的进程
-            processes_to_remove = []
-            need_restart = False
+            # 处理超时任务
+            for taskid, error in timeout_tasks:
+                try:
+                    self.result_q.put_nowait((taskid, error))
+                except queue.Full:
+                    logger.error('mpms result queue full, cannot report timeout for task %s', taskid)
+        
+        # 检查进程状态（在锁外）
+        processes_to_remove = []
+        need_restart = False
+        
+        for name, p in processes_snapshot:
+            process_start_time = self.worker_processes_start_time.get(name, 0)
+            process_age = current_time - process_start_time if process_start_time else 0
             
-            for name, p in tuple(self.worker_processes_pool.items()):  # type:str, multiprocessing.Process
-                process_start_time = self.worker_processes_start_time.get(name, 0)
-                process_age = current_time - process_start_time if process_start_time else 0
+            # 检查进程是否需要因为硬性超时而被杀死
+            if self.lifecycle_duration_hard and process_age > self.lifecycle_duration_hard:
+                logger.warning('mpms subprocess %s exceeded hard timeout %.2fs, terminating', 
+                             name, self.lifecycle_duration_hard)
+                p.terminate()
+                p.join(timeout=1)  # 等待1秒
+                if p.is_alive():
+                    p.kill()  # 如果还活着就强制杀死
+                p.close()
+                processes_to_remove.append(name)
+                need_restart = True
+            elif not p.is_alive():
+                # 进程已死亡的正常处理
+                logger.info('mpms subprocess %s dead, restarting', name)
+                # 重要修复：必须调用join()来回收zombie进程
+                try:
+                    p.join(timeout=0.5)  # 等待0.5秒回收zombie进程
+                except:
+                    pass  # 如果join失败，继续处理
+                p.terminate()  # 确保进程终止（虽然已经死了，但这是个好习惯）
+                p.close()
+                processes_to_remove.append(name)
+                need_restart = True
+        
+        # 如果有进程需要处理，再次获取锁进行修改
+        if processes_to_remove or (need_restart and not task_queue_closed):
+            with self._process_management_lock:
+                # 清理已终止的进程
+                for name in processes_to_remove:
+                    if name in self.worker_processes_pool:
+                        del self.worker_processes_pool[name]
+                    if name in self.worker_processes_start_time:
+                        del self.worker_processes_start_time[name]
                 
-                # 检查进程是否需要因为硬性超时而被杀死
-                if self.lifecycle_duration_hard and process_age > self.lifecycle_duration_hard:
-                    logger.warning('mpms subprocess %s exceeded hard timeout %.2fs, terminating', 
-                                 name, self.lifecycle_duration_hard)
-                    p.terminate()
-                    p.join(timeout=1)  # 等待1秒
-                    if p.is_alive():
-                        p.kill()  # 如果还活着就强制杀死
-                    p.close()
-                    processes_to_remove.append(name)
-                    need_restart = True
-                elif not p.is_alive():
-                    # 进程已死亡的正常处理
-                    logger.info('mpms subprocess %s dead, restarting', name)
-                    p.terminate()
-                    p.close()
-                    processes_to_remove.append(name)
-                    need_restart = True
-            
-            # 清理已终止的进程
-            for name in processes_to_remove:
-                del self.worker_processes_pool[name]
-                if name in self.worker_processes_start_time:
-                    del self.worker_processes_start_time[name]
-            
-        # 如果有进程被终止，可能需要修复日志锁
+                # 如果任务队列已关闭，为新进程发送停止信号
+                if self.task_queue_closed:
+                    for _ in range(len(processes_to_remove) * self.threads_count):
+                        try:
+                            self.task_q.put((StopIteration, (), {}, 0.0), timeout=0.1)
+                        except queue.Full:
+                            logger.debug("task_q full when sending stop signal in _subproc_check")
+                            break
+                
+                # 根据需要启动新进程
+                if need_restart and not self.task_queue_closed:
+                    # 计算需要的进程数
+                    current_process_count = len(self.worker_processes_pool)
+                    # 修复：始终维持配置的进程数，除非任务队列已关闭
+                    needed_process_count = self.processes_count
+                    
+                    # 启动新进程
+                    for _ in range(needed_process_count - current_process_count):
+                        if len(self.worker_processes_pool) < self.processes_count:
+                            time.sleep(0.1)
+                            self._start_one_slaver_process()
+                            time.sleep(0.1)
+        
+        # 如果有进程被终止，可能需要修复日志锁（在锁外执行）
         if processes_to_remove:
             # maybe fix some logging deadlock?
             try:
@@ -725,28 +774,6 @@ class MPMS(object):
                 logging._releaseLock()
             except:
                 pass
-            
-            # 如果任务队列已关闭，为新进程发送停止信号
-            if self.task_queue_closed:
-                for _ in range(len(processes_to_remove) * self.threads_count):
-                    self.task_q.put((StopIteration, (), {}, 0.0))
-            
-        # 根据需要启动新进程
-        if need_restart and not self.task_queue_closed:
-            # 计算需要的进程数
-            current_process_count = len(self.worker_processes_pool)
-            needed_process_count = min(
-                self.processes_count,  # 不超过配置的最大进程数
-                # 根据待处理任务数计算需要的进程数
-                (len(self.running_tasks) + self.threads_count - 1) // self.threads_count
-            )
-            
-            # 启动新进程
-            for _ in range(needed_process_count - current_process_count):
-                if len(self.worker_processes_pool) < self.processes_count:
-                    time.sleep(0.1)
-                    self._start_one_slaver_process()
-                    time.sleep(0.1)
 
     def start(self) -> None:
         if self.worker_processes_pool:
@@ -813,7 +840,12 @@ class MPMS(object):
             # 检查是否有进程已经结束
             for name, p in list(self.worker_processes_pool.items()):  # type: multiprocessing.Process
                 if not p.is_alive():
-                    p.join(timeout=0.1)
+                    # 确保回收zombie进程
+                    try:
+                        p.join(timeout=1.0)  # 增加超时时间到1秒
+                    except:
+                        logger.warning("mpms subprocess %s join failed", name)
+                    
                     logger.debug("mpms subprocess %s %s closed", p.name, p.pid)
                     del self.worker_processes_pool[name]
                     if name in self.worker_processes_start_time:
@@ -856,33 +888,90 @@ class MPMS(object):
         logger.debug("mpms collector %s start", _th_name)
 
         while True:
-            taskid, result = self.result_q.get()
+            try:
+                taskid, result = self.result_q.get(timeout=1.0)
+            except queue.Empty:
+                # 检查是否应该退出
+                if self.task_queue_closed and not any(p.is_alive() for p in self.worker_processes_pool.values()):
+                    logger.warning("mpms collector exiting: task queue closed and no alive workers")
+                    break
+                # 检查collector线程是否应该继续运行
+                if self.task_queue_closed and self.finish_count >= self.total_count:
+                    logger.debug("mpms collector exiting: all tasks completed")
+                    break
+                continue
 
             if taskid is StopIteration:
                 logger.debug("mpms collector got stop signal")
                 break
 
-            _, self.meta.args, self.meta.kwargs, _ = self.running_tasks.pop(taskid)
-            self.meta.taskid = taskid
-            self.finish_count += 1
+            # 修复：检查任务是否还在running_tasks中
+            if taskid in self.running_tasks:
+                _, self.meta.args, self.meta.kwargs, _ = self.running_tasks.pop(taskid)
+                self.meta.taskid = taskid
+                self.finish_count += 1
 
-            try:
-                self.collector(self.meta, result)
-            except:
-                # 为了继续运行, 不抛错
-                logger.error("an error occurs in collector, task: %s", taskid, exc_info=True)
+                try:
+                    self.collector(self.meta, result)
+                except:
+                    # 为了继续运行, 不抛错
+                    logger.error("an error occurs in collector, task: %s", taskid, exc_info=True)
 
-            # 移除meta中已经使用过的字段
-            self.meta.taskid, self.meta.args, self.meta.kwargs = None, (), {}
+                # 移除meta中已经使用过的字段
+                self.meta.taskid, self.meta.args, self.meta.kwargs = None, (), {}
+            else:
+                # 任务已经被处理（可能是超时任务）
+                logger.debug("mpms collector received result for already processed task: %s", taskid)
+                self.finish_count += 1
 
-    def close(self) -> None:
+    def close(self, wait_for_empty: bool = False) -> None:
         """
         Close task queue
+        
+        Args:
+            wait_for_empty: 如果为True，等待任务队列清空后再关闭
         """
 
+        if wait_for_empty:
+            # 等待任务队列清空
+            logger.debug("mpms waiting for task queue to empty before closing")
+            while True:
+                try:
+                    # 检查队列是否为空
+                    if self.task_q.empty():
+                        break
+                except:
+                    # Queue.empty() 在某些情况下可能出错，忽略
+                    pass
+                time.sleep(0.1)
+                # 定期检查进程状态
+                self._subproc_check()
+
         # 在任务队列尾部加入结束信号来关闭任务队列
-        for i in range(self._process_count * self.threads_count):
-            self.task_q.put((StopIteration, (), {}, 0.0))
+        stop_signals_sent = 0
+        total_stop_signals_needed = self._process_count * self.threads_count
+        
+        for i in range(total_stop_signals_needed):
+            retry_count = 0
+            while retry_count < 10:
+                try:
+                    self.task_q.put((StopIteration, (), {}, 0.0), timeout=60.0)
+                    stop_signals_sent += 1
+                    break
+                except queue.Full:
+                    logger.warning("task_q full when closing, retry %d/%d", retry_count + 1, 10)
+                    retry_count += 1
+                    
+                    # 检查是否还有活着的worker
+                    alive_workers = sum(1 for p in self.worker_processes_pool.values() if p.is_alive())
+                    if alive_workers == 0:
+                        logger.error("No alive workers when sending stop signals, breaking")
+                        break
+                        
+            if retry_count >= 10:
+                logger.error("Failed to send stop signal %d/%d after 10 retries", i + 1, total_stop_signals_needed)
+                
+        logger.debug("Sent %d/%d stop signals", stop_signals_sent, total_stop_signals_needed)
         self.task_queue_closed = True
 
     def iter_results(self, timeout: float | None = None) -> t.Iterator[tuple[Meta, t.Any]]:
@@ -984,3 +1073,91 @@ class MPMS(object):
                     
         logger.debug("mpms iter_results completed, total: %d, finished: %d", 
                     self.total_count, self.finish_count)
+
+    def graceful_shutdown(self, timeout: float = 30.0) -> bool:
+        """
+        优雅关闭MPMS实例，适用于轮转场景
+        
+        Args:
+            timeout: 最大等待时间（秒）
+            
+        Returns:
+            bool: 是否成功关闭
+        """
+        start_time = time.time()
+        
+        logger.info("mpms %s starting graceful shutdown", self.name)
+        
+        # 1. 先关闭任务队列，不再接受新任务
+        if not self.task_queue_closed:
+            self.close(wait_for_empty=True)
+        
+        # 2. 等待所有任务完成或超时
+        while time.time() - start_time < timeout:
+            if self.finish_count >= self.total_count:
+                logger.info("mpms %s all tasks completed", self.name)
+                break
+            
+            # 检查是否还有活跃的worker
+            alive_count = sum(1 for p in self.worker_processes_pool.values() if p.is_alive())
+            if alive_count == 0 and self.finish_count < self.total_count:
+                logger.warning("mpms %s no alive workers but %d tasks pending", 
+                             self.name, self.total_count - self.finish_count)
+                break
+                
+            time.sleep(0.5)
+            self._subproc_check()
+        
+        # 3. 强制终止剩余进程
+        if self.worker_processes_pool:
+            logger.warning("mpms %s forcefully terminating %d remaining processes", 
+                         self.name, len(self.worker_processes_pool))
+            for name, p in list(self.worker_processes_pool.items()):
+                try:
+                    p.terminate()
+                    p.join(timeout=1.0)
+                    if p.is_alive():
+                        p.kill()
+                        p.join(timeout=0.5)
+                except:
+                    pass
+                finally:
+                    try:
+                        p.close()
+                    except:
+                        pass
+                    del self.worker_processes_pool[name]
+                    if name in self.worker_processes_start_time:
+                        del self.worker_processes_start_time[name]
+        
+        # 4. 停止collector线程
+        if self.collector and self.collector_thread and self.collector_thread.is_alive():
+            try:
+                self.result_q.put_nowait((StopIteration, None))
+            except queue.Full:
+                logger.warning("mpms %s result queue full when sending stop signal to collector", self.name)
+            
+            self.collector_thread.join(timeout=5.0)
+            if self.collector_thread.is_alive():
+                logger.error("mpms %s collector thread still alive after 5s timeout", self.name)
+        
+        # 5. 清理队列
+        try:
+            # 清空任务队列
+            while not self.task_q.empty():
+                self.task_q.get_nowait()
+        except:
+            pass
+            
+        try:
+            # 清空结果队列
+            while not self.result_q.empty():
+                self.result_q.get_nowait()
+        except:
+            pass
+        
+        success = self.finish_count >= self.total_count
+        logger.info("mpms %s graceful shutdown completed, success=%s, finished=%d/%d", 
+                   self.name, success, self.finish_count, self.total_count)
+        
+        return success
