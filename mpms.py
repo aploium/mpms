@@ -740,28 +740,28 @@ class MPMS(object):
                     if name in self.worker_processes_start_time:
                         del self.worker_processes_start_time[name]
                 
-                # 如果任务队列已关闭，为新进程发送停止信号
-                if self.task_queue_closed:
-                    for _ in range(len(processes_to_remove) * self.threads_count):
-                        try:
-                            self.task_q.put((StopIteration, (), {}, 0.0), timeout=0.1)
-                        except queue.Full:
-                            logger.debug("task_q full when sending stop signal in _subproc_check")
-                            break
+            # 如果任务队列已关闭，为新进程发送停止信号
+            if self.task_queue_closed:
+                for _ in range(len(processes_to_remove) * self.threads_count):
+                    try:
+                        self.task_q.put((StopIteration, (), {}, 0.0), timeout=0.1)
+                    except queue.Full:
+                        logger.debug("task_q full when sending stop signal in _subproc_check")
+                        break
+            
+            # 根据需要启动新进程
+            if need_restart and not self.task_queue_closed:
+                # 计算需要的进程数
+                current_process_count = len(self.worker_processes_pool)
+                # 修复：始终维持配置的进程数，除非任务队列已关闭
+                needed_process_count = self.processes_count
                 
-                # 根据需要启动新进程
-                if need_restart and not self.task_queue_closed:
-                    # 计算需要的进程数
-                    current_process_count = len(self.worker_processes_pool)
-                    # 修复：始终维持配置的进程数，除非任务队列已关闭
-                    needed_process_count = self.processes_count
-                    
-                    # 启动新进程
-                    for _ in range(needed_process_count - current_process_count):
-                        if len(self.worker_processes_pool) < self.processes_count:
-                            time.sleep(0.1)
-                            self._start_one_slaver_process()
-                            time.sleep(0.1)
+                # 启动新进程
+                for _ in range(needed_process_count - current_process_count):
+                    if len(self.worker_processes_pool) < self.processes_count:
+                        time.sleep(0.1)
+                        self._start_one_slaver_process()
+                        time.sleep(0.1)
         
         # 如果有进程被终止，可能需要修复日志锁（在锁外执行）
         if processes_to_remove:
