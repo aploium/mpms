@@ -26,7 +26,7 @@ except ImportError:
 
 __ALL__ = ["MPMS", "Meta", "WorkerGracefulDie"]
 
-VERSION = (2, 5, 2, 0)
+VERSION = (2, 5, 3, 0)
 VERSION_STR = "{}.{}.{}.{}".format(*VERSION)
 
 logger = logging.getLogger(__name__)
