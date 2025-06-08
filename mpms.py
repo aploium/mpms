@@ -7,6 +7,7 @@ import os
 import queue
 import threading
 import logging
+import traceback
 import weakref
 import time
 import typing as t
@@ -25,7 +26,7 @@ except ImportError:
 
 __ALL__ = ["MPMS", "Meta", "WorkerGracefulDie"]
 
-VERSION = (2, 5, 1, 0)
+VERSION = (2, 5, 2, 0)
 VERSION_STR = "{}.{}.{}.{}".format(*VERSION)
 
 logger = logging.getLogger(__name__)
@@ -660,10 +661,10 @@ class MPMS(object):
             self.worker_processes_pool[process_base_name] = p
             self.worker_processes_start_time[process_base_name] = time.time()
 
-    def _subproc_check(self) -> None:
+    def _subproc_check(self, force: bool = False) -> None:
         # 先快速检查是否需要执行
         with self._process_management_lock:
-            if time.time() - self._subproc_last_check < self.subproc_check_interval:
+            if time.time() - self._subproc_last_check < self.subproc_check_interval and not force:
                 return
             self._subproc_last_check = time.time()
             
@@ -965,11 +966,12 @@ class MPMS(object):
                     # 检查是否还有活着的worker
                     alive_workers = sum(1 for p in self.worker_processes_pool.values() if p.is_alive())
                     if alive_workers == 0:
-                        logger.error("No alive workers when sending stop signals, breaking")
-                        break
+                        logger.error("No alive workers when sending stop signals; stack: %s", traceback.format_exc())
+                        self._subproc_check(force=True)
                         
             if retry_count >= 10:
-                logger.error("Failed to send stop signal %d/%d after 10 retries", i + 1, total_stop_signals_needed)
+                logger.error("Failed to send stop signal %d/%d after 10 retries; stack: %s", i + 1, total_stop_signals_needed, traceback.format_exc())
+                self._subproc_check(force=True)
                 
         logger.debug("Sent %d/%d stop signals", stop_signals_sent, total_stop_signals_needed)
         self.task_queue_closed = True
