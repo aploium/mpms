@@ -1,5 +1,10 @@
 # MPMS Changelog
 
+## Version 2.5.4.0
+
+### Fixes
+- Fix error when `p.is_alive()` raises exception
+
 ## Version 2.5.0 (Unreleased)
 
 ### New Features
